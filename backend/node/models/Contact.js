@@ -15,11 +15,11 @@ const { Schema, model } = require("mongoose");
 const contactSchema = new Schema(
   {
     // Bigin's own record id — the most reliable dedup key when present.
-    biginId: { type: String, trim: true, index: true, sparse: true },
+    biginId: { type: String, trim: true },
     firstName: { type: String, trim: true },
     lastName: { type: String, trim: true },
     name: { type: String, trim: true },
-    phone: { type: String, trim: true, index: true },
+    phone: { type: String, trim: true },
     email: { type: String, trim: true, lowercase: true },
     company: { type: String, trim: true },
     source: { type: String, trim: true, default: "bigin" }, // "csv" | "webhook" | ...

@@ -60,26 +60,34 @@ function normalize(record, source) {
 }
 
 // Choose the upsert filter: prefer Bigin's id, else phone. If we have neither
-// there's nothing to dedup on, so we skip the record (returns null).
+// there's nothing to dedup on, so the caller falls back to a plain insert —
+// every record gets stored, we just can't dedup ones with no id/phone.
 function upsertFilter(doc) {
   if (doc.biginId) return { biginId: doc.biginId };
   if (doc.phone) return { phone: doc.phone };
   return null;
 }
 
-// Build a single bulkWrite upsert op, or null if the record is unusable.
-function toBulkOp(doc) {
-  const filter = upsertFilter(doc);
-  if (!filter) return null;
-  // Don't overwrite existing values with blanks — only $set fields we actually got.
+function fieldSet(doc) {
+  // Don't overwrite existing values with blanks — only set fields we actually got.
   const set = {};
   for (const key of ["biginId", "firstName", "lastName", "name", "phone", "email", "company", "source"]) {
     if (doc[key] !== undefined && doc[key] !== "") set[key] = doc[key];
   }
   set.raw = doc.raw;
-  return {
-    updateOne: { filter, update: { $set: set }, upsert: true },
-  };
+  return set;
+}
+
+// Build a single bulkWrite op for this record. Upserts when we have a
+// biginId/phone to dedup on; otherwise inserts it as a new document so no
+// data is ever dropped (e.g. incomplete test payloads from Zoho Flow).
+function toBulkOp(doc) {
+  const filter = upsertFilter(doc);
+  const set = fieldSet(doc);
+  if (filter) {
+    return { updateOne: { filter, update: { $set: set }, upsert: true } };
+  }
+  return { insertOne: { document: set } };
 }
 
 // ---------------------------------------------------------------------------
@@ -126,11 +134,10 @@ function parseCSV(text) {
 }
 
 async function bulkUpsert(docs) {
-  const ops = docs.map(toBulkOp).filter(Boolean);
-  const skipped = docs.length - ops.length;
-  if (!ops.length) return { matched: 0, upserted: 0, modified: 0, skipped };
+  const ops = docs.map(toBulkOp);
+  if (!ops.length) return { matched: 0, upserted: 0, modified: 0, inserted: 0 };
 
-  let upserted = 0, modified = 0, matched = 0;
+  let upserted = 0, modified = 0, matched = 0, inserted = 0;
   // Chunk so a huge CSV doesn't blow past MongoDB's bulk limits.
   const CHUNK = 1000;
   for (let i = 0; i < ops.length; i += CHUNK) {
@@ -138,8 +145,9 @@ async function bulkUpsert(docs) {
     upserted += res.upsertedCount || 0;
     modified += res.modifiedCount || 0;
     matched += res.matchedCount || 0;
+    inserted += res.insertedCount || 0;
   }
-  return { matched, upserted, modified, skipped };
+  return { matched, upserted, modified, inserted };
 }
 
 // ---------------------------------------------------------------------------
@@ -149,9 +157,12 @@ async function bulkUpsert(docs) {
 // POST /api/contacts/webhook — realtime, one contact per call from Zoho Flow.
 // Also accepts an array of contacts, in case a flow batches them.
 router.post("/contacts/webhook", async (req, res) => {
+  console.log(`[contacts/webhook] ${new Date().toISOString()} body:`, JSON.stringify(req.body));
+
   if (WEBHOOK_SECRET) {
     const provided = req.get("x-webhook-secret") || req.query.secret;
     if (provided !== WEBHOOK_SECRET) {
+      console.log("[contacts/webhook] rejected: invalid or missing secret");
       return res.status(401).json({ error: "Invalid or missing webhook secret" });
     }
   }
@@ -162,8 +173,10 @@ router.post("/contacts/webhook", async (req, res) => {
 
   try {
     const result = await bulkUpsert(docs);
+    console.log("[contacts/webhook] result:", result);
     res.status(201).json({ ok: true, received: records.length, ...result });
   } catch (err) {
+    console.error("[contacts/webhook] error:", err.message);
     res.status(500).json({ error: "Failed to save contact(s)", detail: err.message });
   }
 });
