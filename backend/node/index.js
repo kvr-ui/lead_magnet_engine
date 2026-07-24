@@ -14,7 +14,7 @@
  *   PY_TARGET            where the Python backend is running     (default http://127.0.0.1:8000)
  *   MONGODB_URI          MongoDB connection string               (see db.js)
  *   AD_MAGNET_MONGODB_URI  connection string for the external ad/lead-magnet
- *                          DB, viewed read-only at /admin/ad-magnet (optional)
+ *                          DB, read-only via /api/ad-magnet/* (optional)
  *   LEAD_MAGNETS_CONFIG  path to the lead magnets JSON file       (default ./config/leadMagnets.json)
  *
  * Lead magnets (which fields each one collects) are configured once via the
@@ -30,6 +30,7 @@
 
 require("dotenv").config();
 
+const path = require("path");
 const express = require("express");
 const { createProxyMiddleware } = require("http-proxy-middleware");
 const { connectDB, connectAdMagnetDB, mongoose } = require("./db");
@@ -38,6 +39,8 @@ const leadsRouter = require("./routes/leads");
 const adminRouter = require("./routes/admin");
 const contactsRouter = require("./routes/contacts");
 const adMagnetRouter = require("./routes/adMagnet");
+
+const ADMIN_UI_DIST = path.join(__dirname, "..", "..", "frontend", "admin-ui", "dist");
 
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || "0.0.0.0";
@@ -60,8 +63,10 @@ app.use(express.urlencoded({ extended: false }));
 app.use(express.text({ type: ["text/csv", "text/plain"], limit: "50mb" }));
 app.use("/api", leadsRouter);
 app.use("/api", contactsRouter);
+app.use("/api/ad-magnet", adMagnetRouter);
 app.use("/admin", adminRouter);
-app.use("/admin/ad-magnet", adMagnetRouter);
+// React leads dashboard (admin-ui/), built via `npm run build` in that folder.
+app.use("/admin/leads", express.static(ADMIN_UI_DIST));
 
 app.use(
   "/",
@@ -81,6 +86,7 @@ async function start() {
     console.log(`Express proxy listening on http://${HOST}:${PORT}`);
     console.log(`Forwarding to Python backend at ${PY_TARGET}`);
     console.log(`Lead magnet admin UI at /admin/lead-magnets`);
+    console.log(`Leads dashboard (React) at /admin/leads`);
   });
 }
 

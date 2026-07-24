@@ -23,6 +23,18 @@ const contactSchema = new Schema(
     email: { type: String, trim: true, lowercase: true },
     company: { type: String, trim: true },
     source: { type: String, trim: true, default: "bigin" }, // "csv" | "webhook" | ...
+    // CA-specific lead fields — the Zoho Flow for this pipeline sends these
+    // instead of email/company, so surface them as first-class columns too.
+    city: { type: String, trim: true },
+    caStatus: { type: String, trim: true }, // CA_Status: Foundation/Intermediate/Final
+    attempt: { type: String, trim: true },
+    language: { type: String, trim: true },
+    potential: { type: String, trim: true },
+    status: { type: String, trim: true },
+    notes: { type: String, trim: true },
+    leadSource: { type: String, trim: true },
+    ownerName: { type: String, trim: true },
+    referralDate: { type: String, trim: true },
     raw: { type: Map, of: Schema.Types.Mixed, default: {} },
   },
   { timestamps: true }

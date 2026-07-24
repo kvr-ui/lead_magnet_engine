@@ -1,0 +1,35 @@
+function cell(value) {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "boolean") return value ? "yes" : "";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+export default function LeadsTable({ columns, rows, loading, error }) {
+  if (loading) return <p className="muted">Loading…</p>;
+  if (error) return <p className="error">{error}</p>;
+  if (!rows.length) return <p className="muted">No documents.</p>;
+
+  return (
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            {columns.map((col) => (
+              <th key={col.key}>{col.header}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row._id}>
+              {columns.map((col) => (
+                <td key={col.key}>{cell(col.get(row))}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}

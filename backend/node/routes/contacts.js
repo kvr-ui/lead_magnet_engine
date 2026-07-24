@@ -22,6 +22,15 @@ const FIELD_ALIASES = {
   phone: ["phone", "mobile", "phone_number", "mobile_number", "whatsapp", "contact_number"],
   email: ["email", "email_address", "e-mail", "emailid", "email_id"],
   company: ["company", "account_name", "organization", "account name"],
+  city: ["city", "other_city", "location"],
+  caStatus: ["ca_status", "castatus", "level"],
+  attempt: ["attempt"],
+  language: ["language"],
+  potential: ["potential"],
+  status: ["status"],
+  notes: ["notess", "notes", "note"],
+  leadSource: ["lead_source1", "lead_source", "leadsource"],
+  referralDate: ["referral_date", "referraldate"],
 };
 
 function pick(lowerKeyed, aliases) {
@@ -29,6 +38,15 @@ function pick(lowerKeyed, aliases) {
     const v = lowerKeyed[a];
     if (v !== undefined && v !== null && String(v).trim() !== "") return String(v).trim();
   }
+  return undefined;
+}
+
+// Owner is a nested { name, id, email } object rather than a flat field, so
+// it needs its own extraction instead of a simple alias lookup.
+function pickOwnerName(record) {
+  const owner = record?.Owner ?? record?.owner;
+  if (owner && typeof owner === "object" && owner.name) return String(owner.name).trim();
+  if (typeof owner === "string" && owner.trim()) return owner.trim();
   return undefined;
 }
 
@@ -48,6 +66,16 @@ function normalize(record, source) {
     phone: pick(lower, FIELD_ALIASES.phone),
     email: pick(lower, FIELD_ALIASES.email),
     company: pick(lower, FIELD_ALIASES.company),
+    city: pick(lower, FIELD_ALIASES.city),
+    caStatus: pick(lower, FIELD_ALIASES.caStatus),
+    attempt: pick(lower, FIELD_ALIASES.attempt),
+    language: pick(lower, FIELD_ALIASES.language),
+    potential: pick(lower, FIELD_ALIASES.potential),
+    status: pick(lower, FIELD_ALIASES.status),
+    notes: pick(lower, FIELD_ALIASES.notes),
+    leadSource: pick(lower, FIELD_ALIASES.leadSource),
+    referralDate: pick(lower, FIELD_ALIASES.referralDate),
+    ownerName: pickOwnerName(record),
     source,
     raw: record || {},
   };
@@ -71,7 +99,11 @@ function upsertFilter(doc) {
 function fieldSet(doc) {
   // Don't overwrite existing values with blanks — only set fields we actually got.
   const set = {};
-  for (const key of ["biginId", "firstName", "lastName", "name", "phone", "email", "company", "source"]) {
+  for (const key of [
+    "biginId", "firstName", "lastName", "name", "phone", "email", "company", "source",
+    "city", "caStatus", "attempt", "language", "potential", "status", "notes",
+    "leadSource", "referralDate", "ownerName",
+  ]) {
     if (doc[key] !== undefined && doc[key] !== "") set[key] = doc[key];
   }
   set.raw = doc.raw;
@@ -211,14 +243,25 @@ router.post("/contacts/import", async (req, res) => {
   }
 });
 
-// GET /api/contacts — quick list + total count (for verifying the import ran).
+// GET /api/contacts?page=1&limit=50 — paginated list + total count.
 router.get("/contacts", async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit, 10) || 100, 1000);
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
   const [contacts, total] = await Promise.all([
-    Contact.find().sort({ createdAt: -1 }).limit(limit),
+    Contact.find()
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit),
     Contact.estimatedDocumentCount(),
   ]);
-  res.json({ total, count: contacts.length, contacts });
+  res.json({
+    total,
+    count: contacts.length,
+    page,
+    pageSize: limit,
+    totalPages: Math.max(1, Math.ceil(total / limit)),
+    contacts,
+  });
 });
 
 module.exports = router;

@@ -4,7 +4,9 @@
 
 ```
 wati_cleanup/
-├── frontend/            static assets (legacy standalone HTML)
+├── frontend/            all frontend code
+│   ├── wati_cleanup.html  legacy standalone HTML
+│   └── admin-ui/          React leads dashboard (served at /admin/leads)
 ├── backend/
 │   ├── python/          app.py + wati_cleanup.py — the CSV cleaning logic
 │   │                    and htmx UI, listens on 127.0.0.1:8000
@@ -48,7 +50,19 @@ cd /opt/wati_cleanup/backend/node
 sudo -u www-data npm install --omit=dev
 ```
 
-## 3. Run both processes as services (systemd)
+## 3. Build the React leads dashboard (frontend/admin-ui/)
+
+Served by Express at `/admin/leads` from `frontend/admin-ui/dist` — that
+folder isn't committed to git, so it needs a build after every deploy that
+touches it:
+
+```bash
+cd /opt/wati_cleanup/frontend/admin-ui
+sudo -u www-data npm install
+sudo -u www-data npm run build
+```
+
+## 4. Run both processes as services (systemd)
 
 ```bash
 sudo cp /tmp/wati/deploy/wati.service /etc/systemd/system/wati.service
@@ -66,7 +80,7 @@ curl -s http://127.0.0.1:3000/node-health  # -> {"ok":true,...} (Node front door
 
 Logs: `journalctl -u wati -f` and `journalctl -u wati-node -f`
 
-## 4. Put Nginx in front
+## 5. Put Nginx in front
 
 ```bash
 sudo apt install -y nginx
@@ -78,7 +92,7 @@ sudo nginx -t && sudo systemctl reload nginx
 
 Now `http://YOUR_DOMAIN/` serves the app, routed through Express to Python.
 
-## 5. HTTPS (recommended)
+## 6. HTTPS (recommended)
 
 Point your domain's DNS A-record at the server, then:
 
@@ -89,12 +103,14 @@ sudo certbot --nginx -d wati.example.com
 
 Certbot rewrites the Nginx config for TLS and sets up auto-renewal.
 
-## 6. Updating later
+## 7. Updating later
 
 ```bash
 sudo cp -r new/backend/python/* /opt/wati_cleanup/backend/python/
 sudo cp -r new/backend/node/* /opt/wati_cleanup/backend/node/
+sudo cp -r new/frontend/* /opt/wati_cleanup/frontend/
 cd /opt/wati_cleanup/backend/node && sudo -u www-data npm install --omit=dev
+cd /opt/wati_cleanup/frontend/admin-ui && sudo -u www-data npm install && sudo -u www-data npm run build
 sudo systemctl restart wati wati-node
 ```
 

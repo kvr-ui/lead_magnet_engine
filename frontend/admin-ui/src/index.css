@@ -1,0 +1,139 @@
+:root {
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #020617;
+  color: #f1f5f9;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 1.5rem;
+}
+
+h1 {
+  font-size: 1.5rem;
+  font-weight: 600;
+  margin: 0 0 1rem;
+}
+
+.tabs,
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.tab,
+.chip {
+  background: #0f172a;
+  border: 1px solid #1e293b;
+  color: #f1f5f9;
+  border-radius: 0.375rem;
+  padding: 0.4rem 0.9rem;
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+
+.tab:hover,
+.chip:hover {
+  background: #1e293b;
+}
+
+.tab.active,
+.chip.active {
+  background: #4338ca;
+  border-color: #4f46e5;
+}
+
+.search-input {
+  display: block;
+  width: 100%;
+  max-width: 24rem;
+  background: #0f172a;
+  border: 1px solid #1e293b;
+  color: #f1f5f9;
+  border-radius: 0.375rem;
+  padding: 0.4rem 0.75rem;
+  font-size: 0.875rem;
+  margin-bottom: 1rem;
+}
+
+.muted {
+  color: #64748b;
+  font-size: 0.875rem;
+}
+
+.error {
+  color: #f87171;
+  font-size: 0.875rem;
+}
+
+.notice {
+  background: #451a03;
+  border: 1px solid #92400e;
+  color: #fbbf24;
+  border-radius: 0.375rem;
+  padding: 0.5rem 1rem;
+  font-size: 0.875rem;
+}
+
+.table-wrap {
+  overflow-x: auto;
+  margin: 0.75rem 0;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+th {
+  text-align: left;
+  color: #64748b;
+  padding: 0.5rem 1rem 0.5rem 0;
+  white-space: nowrap;
+}
+
+td {
+  padding: 0.5rem 1rem 0.5rem 0;
+  white-space: nowrap;
+  border-top: 1px solid #1e293b;
+}
+
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.875rem;
+  margin: 0.5rem 0;
+}
+
+.pager button {
+  background: #0f172a;
+  border: 1px solid #1e293b;
+  color: #f1f5f9;
+  border-radius: 0.375rem;
+  padding: 0.25rem 0.75rem;
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+
+.pager button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.pager button:not(:disabled):hover {
+  background: #1e293b;
+}
