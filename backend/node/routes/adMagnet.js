@@ -112,6 +112,7 @@ router.get("/students", async (req, res) => {
         city: 1,
         caLevel: 1,
         examDate: 1,
+        attemptGiven: 1,
         createdAt: 1,
         mcqAttempted: { $sum: "$progress.totalAttempted" },
         mcqCorrect: { $sum: "$progress.totalCorrect" },

@@ -9,6 +9,7 @@ const COLUMNS = [
   { key: "phoneNumber", header: "Phone", get: (d) => d.phoneNumber },
   { key: "city", header: "City", get: (d) => d.city },
   { key: "caLevel", header: "CA Level", get: (d) => d.caLevel },
+  { key: "attemptGiven", header: "Attempt", get: (d) => d.attemptGiven },
   { key: "mcqAttempted", header: "MCQs Solved", get: (d) => d.mcqAttempted || 0 },
   { key: "mcqCorrect", header: "MCQs Correct", get: (d) => d.mcqCorrect || 0 },
   {
