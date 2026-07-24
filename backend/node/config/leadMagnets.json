@@ -1,0 +1,20 @@
+{
+  "leadMagnets": [
+    {
+      "key": "free-ebook",
+      "label": "Free Ebook Download",
+      "fields": [
+        { "name": "book_title", "type": "string", "required": true },
+        { "name": "profession", "type": "string", "required": false }
+      ]
+    },
+    {
+      "key": "webinar-signup",
+      "label": "Webinar Signup",
+      "fields": [
+        { "name": "webinar_date", "type": "string", "required": true },
+        { "name": "company_size", "type": "string", "required": false }
+      ]
+    }
+  ]
+}

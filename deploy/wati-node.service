@@ -1,0 +1,27 @@
+[Unit]
+Description=Bigin -> WATI CSV cleaner (Express front door)
+After=network.target wati.service
+Requires=wati.service
+
+[Service]
+Type=simple
+# Change User/Group and paths to match your server.
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/wati_cleanup/backend/node
+Environment=HOST=127.0.0.1
+Environment=PORT=3000
+Environment=PY_TARGET=http://127.0.0.1:8000
+Environment=MONGODB_URI=mongodb://127.0.0.1:27017/wati_cleanup
+ExecStart=/usr/bin/node /opt/wati_cleanup/backend/node/index.js
+Restart=always
+RestartSec=2
+
+# hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
