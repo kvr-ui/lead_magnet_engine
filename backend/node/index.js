@@ -13,6 +13,8 @@
  *   HOST                 bind address for this server           (default 0.0.0.0)
  *   PY_TARGET            where the Python backend is running     (default http://127.0.0.1:8000)
  *   MONGODB_URI          MongoDB connection string               (see db.js)
+ *   AD_MAGNET_MONGODB_URI  connection string for the external ad/lead-magnet
+ *                          DB, viewed read-only at /admin/ad-magnet (optional)
  *   LEAD_MAGNETS_CONFIG  path to the lead magnets JSON file       (default ./config/leadMagnets.json)
  *
  * Lead magnets (which fields each one collects) are configured once via the
@@ -30,11 +32,12 @@ require("dotenv").config();
 
 const express = require("express");
 const { createProxyMiddleware } = require("http-proxy-middleware");
-const { connectDB, mongoose } = require("./db");
+const { connectDB, connectAdMagnetDB, mongoose } = require("./db");
 const { initLeadMagnets } = require("./lib/leadMagnets");
 const leadsRouter = require("./routes/leads");
 const adminRouter = require("./routes/admin");
 const contactsRouter = require("./routes/contacts");
+const adMagnetRouter = require("./routes/adMagnet");
 
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || "0.0.0.0";
@@ -58,6 +61,7 @@ app.use(express.text({ type: ["text/csv", "text/plain"], limit: "50mb" }));
 app.use("/api", leadsRouter);
 app.use("/api", contactsRouter);
 app.use("/admin", adminRouter);
+app.use("/admin/ad-magnet", adMagnetRouter);
 
 app.use(
   "/",
@@ -71,6 +75,7 @@ app.use(
 
 async function start() {
   await connectDB();
+  await connectAdMagnetDB();
   await initLeadMagnets();
   app.listen(PORT, HOST, () => {
     console.log(`Express proxy listening on http://${HOST}:${PORT}`);
