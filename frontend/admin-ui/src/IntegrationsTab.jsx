@@ -88,7 +88,8 @@ export default function IntegrationsTab() {
               <div className="panel" style={{ marginTop: "1rem" }}>
                 <h4>Webhook (delivery, read, reply tracking)</h4>
                 <p className="muted">
-                  Paste this URL into WATI → Team Inbox Settings → Webhook Settings so we can track what happens
+                  In WATI, go to <strong>Connectors → Webhooks → Add Webhook</strong>, paste this URL, set status to
+                  Enabled, and select the events you want (delivered, read, replied) so we can track what happens
                   after a campaign message is sent.
                 </p>
                 <label className="form-row">
