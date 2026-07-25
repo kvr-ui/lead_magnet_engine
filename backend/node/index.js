@@ -41,6 +41,7 @@ const contactsRouter = require("./routes/contacts");
 const adMagnetRouter = require("./routes/adMagnet");
 const campaignsRouter = require("./routes/campaigns");
 const integrationsRouter = require("./routes/integrations");
+const dataSourcesRouter = require("./routes/dataSources");
 const { startScheduler } = require("./lib/campaignEngine");
 const { requireAdminAuth } = require("./lib/adminAuth");
 const whatsappProvider = require("./lib/whatsappProvider");
@@ -71,6 +72,7 @@ app.use("/api", leadsRouter);
 app.use("/api", contactsRouter);
 app.use("/api", requireAdminAuth, campaignsRouter);
 app.use("/api", requireAdminAuth, integrationsRouter);
+app.use("/api", requireAdminAuth, dataSourcesRouter);
 app.use("/api/ad-magnet", requireAdminAuth, adMagnetRouter);
 app.use("/admin", requireAdminAuth, adminRouter);
 // React leads dashboard (admin-ui/), built via `npm run build` in that folder.

@@ -267,3 +267,47 @@ select {
 .clickable-row:hover {
   background: #1e293b;
 }
+
+.field-picker {
+  position: relative;
+  display: inline-block;
+  margin-bottom: 1rem;
+}
+
+.field-picker-menu {
+  position: absolute;
+  z-index: 10;
+  top: calc(100% + 0.25rem);
+  left: 0;
+  background: #0f172a;
+  border: 1px solid #1e293b;
+  border-radius: 0.5rem;
+  padding: 0.5rem;
+  max-height: 20rem;
+  min-width: 14rem;
+  overflow-y: auto;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.4);
+}
+
+.field-picker-actions {
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.25rem 0.4rem 0.5rem;
+  border-bottom: 1px solid #1e293b;
+  margin-bottom: 0.25rem;
+}
+
+.field-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0.4rem;
+  font-size: 0.8125rem;
+  border-radius: 0.25rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.field-picker-item:hover {
+  background: #1e293b;
+}

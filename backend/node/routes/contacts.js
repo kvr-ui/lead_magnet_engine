@@ -1,6 +1,7 @@
 const express = require("express");
 const Contact = require("../models/Contact");
 const { requireAdminAuth } = require("../lib/adminAuth");
+const { getSourceFields } = require("../lib/sourceFields");
 
 const router = express.Router();
 
@@ -263,6 +264,14 @@ router.get("/contacts", requireAdminAuth, async (req, res) => {
     totalPages: Math.max(1, Math.ceil(total / limit)),
     contacts,
   });
+});
+
+// GET /api/contacts/fields — schema-known field names for the leads-page
+// column picker. Contact has an explicit Mongoose schema, so this is static
+// rather than sampled.
+router.get("/contacts/fields", requireAdminAuth, async (_req, res) => {
+  const fields = await getSourceFields("Contact");
+  res.json({ fields: fields.map((f) => f.key) });
 });
 
 module.exports = router;

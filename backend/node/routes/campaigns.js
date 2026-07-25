@@ -1,41 +1,21 @@
 const express = require("express");
 const Campaign = require("../models/Campaign");
 const CampaignEnrollment = require("../models/CampaignEnrollment");
-const Contact = require("../models/Contact");
-const Lead = require("../models/Lead");
-const { getAdMagnetConnection } = require("../db");
 const { enrollTargets, previewTargets, sendSingleMessage } = require("../lib/campaignEngine");
 const whatsappProvider = require("../lib/whatsappProvider");
+const { getSourceFields } = require("../lib/sourceFields");
+const { getSourceHandle, validateFilter } = require("../lib/sourceData");
 
 const router = express.Router();
-
-// Filterable fields per target source, for the UI's field-picker. Mirrors the
-// columns already shown in ZohoTab.jsx/CaGuruTab.jsx.
-const SOURCE_FIELDS = {
-  Contact: [
-    { key: "caStatus", label: "CA Level" },
-    { key: "city", label: "City" },
-    { key: "attempt", label: "Attempt" },
-    { key: "potential", label: "Potential" },
-    { key: "status", label: "Status" },
-    { key: "leadSource", label: "Lead Source" },
-    { key: "ownerName", label: "Owner" },
-  ],
-  Lead: [{ key: "leadMagnet", label: "Lead Magnet" }],
-  AdMagnetStudent: [
-    { key: "caLevel", label: "CA Level" },
-    { key: "city", label: "City" },
-    { key: "attemptGiven", label: "Attempt" },
-  ],
-};
 
 const VALUES_CAP = 200;
 
 // Distinct values (+ counts) for one field of one source — powers the
-// filter builder's value dropdown. `field` is checked against SOURCE_FIELDS
-// (a whitelist) before being interpolated into the aggregation pipeline.
+// filter builder's value dropdown. `field` is checked against the source's
+// real fields (a whitelist) before being interpolated into the aggregation
+// pipeline.
 async function distinctValues(source, field) {
-  const fields = SOURCE_FIELDS[source];
+  const fields = await getSourceFields(source);
   if (!fields) throw new Error(`Unknown source "${source}"`);
   if (!fields.some((f) => f.key === field)) {
     throw new Error(`Field "${field}" is not filterable for source "${source}"`);
@@ -48,66 +28,45 @@ async function distinctValues(source, field) {
     { $limit: VALUES_CAP },
   ];
 
-  let rows;
-  if (source === "Contact") {
-    rows = await Contact.aggregate(pipeline);
-  } else if (source === "Lead") {
-    rows = await Lead.aggregate(pipeline);
-  } else {
-    const conn = getAdMagnetConnection();
-    if (!conn) throw new Error("AD_MAGNET_MONGODB_URI not configured");
-    rows = await conn.db.collection("users").aggregate(pipeline).toArray();
-  }
+  const handle = await getSourceHandle(source);
+  const rows =
+    handle.kind === "model"
+      ? await handle.model.aggregate(pipeline)
+      : await handle.collection.aggregate(pipeline).toArray();
   return rows.map((r) => ({ value: r._id, count: r.count }));
 }
 
 // Fields to return per document when listing members for the segment
-// builder's live preview table — mirrors SOURCE_FIELDS plus identity columns.
+// builder's live preview table — a fixed identity-column subset, independent
+// of the full filterable field list from getSourceFields().
 const MEMBER_PROJECTIONS = {
   Contact: "name phone caStatus city attempt potential status leadSource ownerName",
   Lead: "name phone email leadMagnet",
   AdMagnetStudent: { name: 1, email: 1, phoneNumber: 1, city: 1, caLevel: 1, attemptGiven: 1 },
 };
 
-// Only lets through filter keys that are whitelisted as filterable for the
-// given source, so a query-string filter can't reach into arbitrary fields.
-function validateFilter(source, filter) {
-  const fields = SOURCE_FIELDS[source];
-  if (!fields) throw new Error(`Unknown source "${source}"`);
-  const allowed = new Set(fields.map((f) => f.key));
-  for (const key of Object.keys(filter || {})) {
-    if (!allowed.has(key)) throw new Error(`Field "${key}" is not filterable for source "${source}"`);
-  }
-  return filter || {};
-}
-
 // Paginated, actual matching documents for a source + filter — powers the
 // segment builder's live members table (distinct from previewTargets, which
 // only returns counts).
 async function listMembers(source, filter, page, limit) {
   const skip = (page - 1) * limit;
+  const handle = await getSourceHandle(source);
 
-  if (source === "Contact") {
+  if (handle.kind === "model") {
+    const projection = MEMBER_PROJECTIONS[source] || "";
     const [members, total] = await Promise.all([
-      Contact.find(filter).select(MEMBER_PROJECTIONS.Contact).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
-      Contact.countDocuments(filter),
-    ]);
-    return { members, total };
-  }
-  if (source === "Lead") {
-    const [members, total] = await Promise.all([
-      Lead.find(filter).select(MEMBER_PROJECTIONS.Lead).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
-      Lead.countDocuments(filter),
+      handle.model.find(filter).select(projection).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      handle.model.countDocuments(filter),
     ]);
     return { members, total };
   }
 
-  const conn = getAdMagnetConnection();
-  if (!conn) throw new Error("AD_MAGNET_MONGODB_URI not configured");
-  const collection = conn.db.collection("users");
+  const projection = MEMBER_PROJECTIONS[source];
+  const cursor = handle.collection.find(filter);
+  if (projection) cursor.project(projection);
   const [members, total] = await Promise.all([
-    collection.find(filter).project(MEMBER_PROJECTIONS.AdMagnetStudent).skip(skip).limit(limit).toArray(),
-    collection.countDocuments(filter),
+    cursor.skip(skip).limit(limit).toArray(),
+    handle.collection.countDocuments(filter),
   ]);
   return { members, total };
 }
@@ -116,7 +75,7 @@ async function listMembers(source, filter, page, limit) {
 router.get("/campaigns/meta/members", async (req, res) => {
   try {
     const source = req.query.source;
-    const filter = validateFilter(source, req.query.filter ? JSON.parse(req.query.filter) : {});
+    const filter = await validateFilter(source, req.query.filter ? JSON.parse(req.query.filter) : {});
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
 
@@ -152,8 +111,8 @@ router.get("/campaigns/meta/channels", async (_req, res) => {
 });
 
 // GET /api/campaigns/meta/fields?source=Contact|Lead|AdMagnetStudent
-router.get("/campaigns/meta/fields", (req, res) => {
-  const fields = SOURCE_FIELDS[req.query.source];
+router.get("/campaigns/meta/fields", async (req, res) => {
+  const fields = await getSourceFields(req.query.source);
   if (!fields) return res.status(400).json({ error: `Unknown source "${req.query.source}"` });
   res.json({ fields });
 });

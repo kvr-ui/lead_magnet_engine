@@ -22,8 +22,16 @@ export function fetchAdMagnetStudents(page, search = "") {
   return getJSON(`/api/ad-magnet/students?${params.toString()}`);
 }
 
+export function fetchAdMagnetStudentFields() {
+  return getJSON("/api/ad-magnet/students/fields");
+}
+
 export function fetchContacts(page, pageSize = 50) {
   return getJSON(`/api/contacts?limit=${pageSize}&page=${page}`);
+}
+
+export function fetchContactFields() {
+  return getJSON("/api/contacts/fields");
 }
 
 // --- Drip campaigns ---------------------------------------------------
@@ -82,6 +90,37 @@ export function fetchChannels() {
 
 export function sendSingleMessage({ phone, templateId, providerMeta, channelId }) {
   return sendJSON("POST", "/api/campaigns/send-message", { phone, templateId, providerMeta, channelId });
+}
+
+// --- Generic lead-magnet data source connections ------------------------
+
+export function fetchDataSources() {
+  return getJSON("/api/data-sources");
+}
+
+export function createDataSource(body) {
+  return sendJSON("POST", "/api/data-sources", body);
+}
+
+export function updateDataSource(id, body) {
+  return sendJSON("PATCH", `/api/data-sources/${id}`, body);
+}
+
+export function testDataSource(id) {
+  return sendJSON("POST", `/api/data-sources/${id}/test`);
+}
+
+export function deleteDataSource(id) {
+  return sendJSON("DELETE", `/api/data-sources/${id}`);
+}
+
+export function fetchDataSourceFields(id) {
+  return getJSON(`/api/data-sources/${id}/fields`);
+}
+
+export function fetchDataSourceDocuments(id, page, filter) {
+  const params = new URLSearchParams({ page, filter: JSON.stringify(filter || {}) });
+  return getJSON(`/api/data-sources/${id}/documents?${params.toString()}`);
 }
 
 // --- WhatsApp provider integration -------------------------------------

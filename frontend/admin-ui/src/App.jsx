@@ -1,11 +1,23 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import CaGuruTab from "./CaGuruTab";
 import ZohoTab from "./ZohoTab";
 import CampaignsTab from "./CampaignsTab";
 import IntegrationsTab from "./IntegrationsTab";
+import DataSourcesTab from "./DataSourcesTab";
+import LeadMagnetDataTab from "./LeadMagnetDataTab";
+import { fetchDataSources } from "./api";
 
 export default function App() {
   const [tab, setTab] = useState("ca-guru");
+  const [dataSources, setDataSources] = useState([]);
+
+  function reloadDataSources() {
+    fetchDataSources()
+      .then((all) => setDataSources(all.filter((ds) => ds.active)))
+      .catch(() => setDataSources([]));
+  }
+
+  useEffect(reloadDataSources, []);
 
   return (
     <div className="page">
@@ -17,8 +29,21 @@ export default function App() {
         <button type="button" className={`tab ${tab === "zoho" ? "active" : ""}`} onClick={() => setTab("zoho")}>
           Zoho Contacts
         </button>
+        {dataSources.map((ds) => (
+          <button
+            type="button"
+            key={ds._id}
+            className={`tab ${tab === `ds-${ds._id}` ? "active" : ""}`}
+            onClick={() => setTab(`ds-${ds._id}`)}
+          >
+            {ds.label}
+          </button>
+        ))}
         <button type="button" className={`tab ${tab === "campaigns" ? "active" : ""}`} onClick={() => setTab("campaigns")}>
           Campaigns
+        </button>
+        <button type="button" className={`tab ${tab === "data-sources" ? "active" : ""}`} onClick={() => setTab("data-sources")}>
+          Data Sources
         </button>
         <button type="button" className={`tab ${tab === "integrations" ? "active" : ""}`} onClick={() => setTab("integrations")}>
           Integrations
@@ -26,7 +51,11 @@ export default function App() {
       </div>
       {tab === "ca-guru" && <CaGuruTab />}
       {tab === "zoho" && <ZohoTab />}
+      {dataSources.map(
+        (ds) => tab === `ds-${ds._id}` && <LeadMagnetDataTab key={ds._id} dataSourceId={ds._id} label={ds.label} />
+      )}
       {tab === "campaigns" && <CampaignsTab />}
+      {tab === "data-sources" && <DataSourcesTab onChanged={reloadDataSources} />}
       {tab === "integrations" && <IntegrationsTab />}
     </div>
   );

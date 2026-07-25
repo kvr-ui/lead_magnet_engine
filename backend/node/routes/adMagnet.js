@@ -1,5 +1,6 @@
 const express = require("express");
 const { getAdMagnetConnection } = require("../db");
+const { getSourceFields } = require("../lib/sourceFields");
 
 const router = express.Router();
 
@@ -104,20 +105,15 @@ router.get("/students", async (req, res) => {
       },
     },
     {
-      $project: {
-        _id: 1,
-        name: 1,
-        email: 1,
-        phoneNumber: 1,
-        city: 1,
-        caLevel: 1,
-        examDate: 1,
-        attemptGiven: 1,
-        createdAt: 1,
+      $addFields: {
         mcqAttempted: { $sum: "$progress.totalAttempted" },
         mcqCorrect: { $sum: "$progress.totalCorrect" },
       },
     },
+    // Keep the rest of the real document (not just a fixed subset) so the
+    // frontend's field picker can show any column that actually exists, but
+    // never leak OTP secrets or mongoose/join internals.
+    { $project: { progress: 0, phoneOtp: 0, phoneOtpExpires: 0, __v: 0 } },
   ];
 
   const students = await usersColl.aggregate(pipeline).toArray();
@@ -129,6 +125,20 @@ router.get("/students", async (req, res) => {
     totalPages: Math.max(1, Math.ceil(total / PAGE_SIZE)),
     students,
   });
+});
+
+// GET /api/ad-magnet/students/fields — distinct field names seen on the
+// external "users" collection, for the leads-page column picker. There's no
+// Mongoose schema for this collection (it lives in a separate DB), so
+// getSourceFields() discovers fields by sampling documents instead of a
+// static list.
+router.get("/students/fields", async (_req, res) => {
+  const conn = getAdMagnetConnection();
+  if (!conn) {
+    return res.status(503).json({ error: "AD_MAGNET_MONGODB_URI not configured" });
+  }
+  const fields = await getSourceFields("AdMagnetStudent");
+  res.json({ fields: fields.map((f) => f.key) });
 });
 
 module.exports = router;
