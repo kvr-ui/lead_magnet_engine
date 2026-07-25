@@ -1,8 +1,16 @@
 const express = require("express");
 const DataSourceConnection = require("../models/DataSourceConnection");
 const { encrypt } = require("../lib/crypto");
-const { testConnection, evict, getConnectionFor } = require("../lib/dataSourcePool");
-const { getSourceFields, sampleFieldKeys, DYNAMIC_PREFIX } = require("../lib/sourceFields");
+const { testConnection, evict, getConnectionFor, listDatabases, listCollections } = require("../lib/dataSourcePool");
+const { getSourceFields, sampleFieldKeys, ALWAYS_EXCLUDED, DYNAMIC_PREFIX } = require("../lib/sourceFields");
+
+// Same fields hidden from the field-picker are stripped from the raw
+// documents too — otherwise something like phoneOtp just isn't offered as a
+// column, but still goes out over the wire in the JSON response. _id stays
+// (the frontend table keys rows on it).
+const DOCUMENT_PROJECTION = Object.fromEntries(
+  [...ALWAYS_EXCLUDED].filter((key) => key !== "_id").map((key) => [key, 0])
+);
 const { validateFilter } = require("../lib/sourceData");
 
 const router = express.Router();
@@ -41,14 +49,56 @@ async function refreshFieldsCache(doc) {
   return keys;
 }
 
+// POST /api/data-sources/discover-databases — given just a Mongo URI (no
+// database picked yet), list the real databases on that cluster so the
+// connect form can offer a dropdown. Requires the connection's user to have
+// listDatabases privileges — scoped Atlas users may not, so callers should
+// treat failure as "fall back to typing the database name" rather than fatal.
+// Body: { mongoUri }
+router.post("/data-sources/discover-databases", async (req, res) => {
+  const { mongoUri } = req.body || {};
+  if (!mongoUri) return res.status(400).json({ error: "mongoUri is required" });
+  try {
+    const databases = await listDatabases({ mongoUri });
+    res.json({ databases });
+  } catch (err) {
+    res.status(400).json({ error: "Connection failed", detail: err.message });
+  }
+});
+
 // POST /api/data-sources — connect a new external Mongo collection.
-// Body: { label, mongoUri, databaseName?, collectionName }
+// Body: { label, mongoUri, databaseName?, collectionName? }
+// collectionName is optional: if omitted, the database's collections are
+// discovered and used automatically when there's exactly one. If there's
+// more than one, the request is rejected with 409 + the discovered list so
+// the UI can ask the admin to pick — we never guess which one is "the" data.
 // Tests the connection before ever persisting the URI.
 router.post("/data-sources", async (req, res) => {
-  const { label, mongoUri, databaseName, collectionName } = req.body || {};
-  if (!label || !mongoUri || !collectionName) {
-    return res.status(400).json({ error: "label, mongoUri, and collectionName are required" });
+  const { label, mongoUri, databaseName } = req.body || {};
+  let { collectionName } = req.body || {};
+  if (!label || !mongoUri) {
+    return res.status(400).json({ error: "label and mongoUri are required" });
   }
+
+  if (!collectionName) {
+    let discovered;
+    try {
+      discovered = await listCollections({ mongoUri, databaseName });
+    } catch (err) {
+      return res.status(400).json({ error: "Connection failed", detail: err.message });
+    }
+    if (discovered.length === 0) {
+      return res.status(400).json({ error: "No collections found in that database" });
+    }
+    if (discovered.length > 1) {
+      return res.status(409).json({
+        error: "Multiple collections found in that database — pick one",
+        collections: discovered,
+      });
+    }
+    collectionName = discovered[0];
+  }
+
   try {
     await testConnection({ mongoUri, databaseName, collectionName });
   } catch (err) {
@@ -186,7 +236,7 @@ router.get("/data-sources/:id/documents", async (req, res) => {
     const { getSourceHandle } = require("../lib/sourceData");
     const handle = await getSourceHandle(source);
     const [documents, total] = await Promise.all([
-      handle.collection.find(filter).skip(skip).limit(limit).toArray(),
+      handle.collection.find(filter).project(DOCUMENT_PROJECTION).skip(skip).limit(limit).toArray(),
       handle.collection.countDocuments(filter),
     ]);
     res.json({ documents, total, page, pageSize: limit, totalPages: Math.max(1, Math.ceil(total / limit)) });

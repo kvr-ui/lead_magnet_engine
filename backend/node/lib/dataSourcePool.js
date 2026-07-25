@@ -32,6 +32,42 @@ async function getConnectionFor(doc) {
   return connPromise;
 }
 
+// System databases every Mongo deployment has, never real lead-magnet data —
+// hidden from the "browse databases" dropdown.
+const SYSTEM_DATABASES = new Set(["admin", "local", "config"]);
+
+// Throwaway probe connection, not pooled — lets the connect form offer a
+// dropdown of real database names before the admin has to know the exact one.
+// Requires the connection's user to have listDatabases privileges; some
+// scoped Atlas users won't, so callers should fall back to manual entry on
+// failure rather than treating this as fatal.
+async function listDatabases({ mongoUri }) {
+  const conn = mongoose.createConnection(mongoUri);
+  try {
+    await conn.asPromise();
+    const { databases } = await conn.db.admin().listDatabases();
+    return databases.map((d) => d.name).filter((name) => !SYSTEM_DATABASES.has(name)).sort();
+  } finally {
+    await conn.close().catch(() => {});
+  }
+}
+
+// Throwaway probe connection, not pooled — lets the connect form offer a
+// dropdown of real collection names instead of the admin typing one blind.
+async function listCollections({ mongoUri, databaseName }) {
+  const conn = mongoose.createConnection(mongoUri, buildOptions(databaseName));
+  try {
+    await conn.asPromise();
+    const collections = await conn.db.listCollections().toArray();
+    return collections
+      .map((c) => c.name)
+      .filter((name) => !name.startsWith("system."))
+      .sort();
+  } finally {
+    await conn.close().catch(() => {});
+  }
+}
+
 // Throwaway probe connection, not pooled — used to validate credentials
 // before ever persisting them (create) or when they change (edit).
 async function testConnection({ mongoUri, databaseName, collectionName }) {
@@ -62,4 +98,4 @@ async function evict(id) {
   }
 }
 
-module.exports = { getConnectionFor, testConnection, evict };
+module.exports = { getConnectionFor, testConnection, listDatabases, listCollections, evict };
