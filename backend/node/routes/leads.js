@@ -1,6 +1,7 @@
 const express = require("express");
 const Lead = require("../models/Lead");
 const { getLeadMagnet, listLeadMagnets, validateExtraFields } = require("../lib/leadMagnets");
+const { requireAdminAuth } = require("../lib/adminAuth");
 
 const router = express.Router();
 
@@ -41,8 +42,8 @@ router.post("/leads/:magnetKey", async (req, res) => {
   }
 });
 
-// GET /api/leads/:magnetKey — list leads for one magnet
-router.get("/leads/:magnetKey", async (req, res) => {
+// GET /api/leads/:magnetKey — list leads for one magnet (admin only)
+router.get("/leads/:magnetKey", requireAdminAuth, async (req, res) => {
   const magnet = getLeadMagnet(req.params.magnetKey);
   if (!magnet) {
     return res.status(404).json({ error: `Unknown lead magnet "${req.params.magnetKey}"` });

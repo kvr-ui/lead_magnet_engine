@@ -33,7 +33,7 @@ const campaignSchema = new Schema(
   {
     name: { type: String, required: true, trim: true, unique: true },
     description: { type: String, trim: true },
-    targetModel: { type: String, enum: ["Contact", "Lead"], required: true },
+    targetModel: { type: String, enum: ["Contact", "Lead", "AdMagnetStudent"], required: true },
     steps: {
       type: [stepSchema],
       validate: (v) => Array.isArray(v) && v.length > 0,

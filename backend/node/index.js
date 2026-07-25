@@ -41,6 +41,7 @@ const contactsRouter = require("./routes/contacts");
 const adMagnetRouter = require("./routes/adMagnet");
 const campaignsRouter = require("./routes/campaigns");
 const { startScheduler } = require("./lib/campaignEngine");
+const { requireAdminAuth } = require("./lib/adminAuth");
 
 const ADMIN_UI_DIST = path.join(__dirname, "..", "..", "frontend", "admin-ui", "dist");
 
@@ -65,11 +66,11 @@ app.use(express.urlencoded({ extended: false }));
 app.use(express.text({ type: ["text/csv", "text/plain"], limit: "50mb" }));
 app.use("/api", leadsRouter);
 app.use("/api", contactsRouter);
-app.use("/api", campaignsRouter);
-app.use("/api/ad-magnet", adMagnetRouter);
-app.use("/admin", adminRouter);
+app.use("/api", requireAdminAuth, campaignsRouter);
+app.use("/api/ad-magnet", requireAdminAuth, adMagnetRouter);
+app.use("/admin", requireAdminAuth, adminRouter);
 // React leads dashboard (admin-ui/), built via `npm run build` in that folder.
-app.use("/admin/leads", express.static(ADMIN_UI_DIST));
+app.use("/admin/leads", requireAdminAuth, express.static(ADMIN_UI_DIST));
 
 app.use(
   "/",

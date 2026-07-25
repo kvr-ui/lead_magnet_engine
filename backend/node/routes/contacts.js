@@ -1,5 +1,6 @@
 const express = require("express");
 const Contact = require("../models/Contact");
+const { requireAdminAuth } = require("../lib/adminAuth");
 
 const router = express.Router();
 
@@ -218,7 +219,7 @@ router.post("/contacts/webhook", async (req, res) => {
 //   curl -X POST http://HOST/api/contacts/import \
 //        -H "Content-Type: text/csv" --data-binary @contacts.csv
 // Or POST JSON { "contacts": [ {...}, {...} ] } with Content-Type: application/json.
-router.post("/contacts/import", async (req, res) => {
+router.post("/contacts/import", requireAdminAuth, async (req, res) => {
   let records;
   if (typeof req.body === "string") {
     records = parseCSV(req.body);
@@ -244,7 +245,7 @@ router.post("/contacts/import", async (req, res) => {
 });
 
 // GET /api/contacts?page=1&limit=50 — paginated list + total count.
-router.get("/contacts", async (req, res) => {
+router.get("/contacts", requireAdminAuth, async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit, 10) || 100, 1000);
   const page = Math.max(1, parseInt(req.query.page, 10) || 1);
   const [contacts, total] = await Promise.all([

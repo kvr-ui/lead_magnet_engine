@@ -5,6 +5,17 @@ async function getJSON(url) {
   return body;
 }
 
+async function sendJSON(method, url, data) {
+  const res = await fetch(url, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data ?? {}),
+  });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.detail || body.error || `Request failed: ${res.status}`);
+  return body;
+}
+
 export function fetchAdMagnetStudents(page, search = "") {
   const params = new URLSearchParams({ page });
   if (search) params.set("search", search);
@@ -13,4 +24,45 @@ export function fetchAdMagnetStudents(page, search = "") {
 
 export function fetchContacts(page, pageSize = 50) {
   return getJSON(`/api/contacts?limit=${pageSize}&page=${page}`);
+}
+
+// --- Drip campaigns ---------------------------------------------------
+
+export function fetchCampaigns() {
+  return getJSON("/api/campaigns");
+}
+
+export function fetchCampaign(id) {
+  return getJSON(`/api/campaigns/${id}`);
+}
+
+export function createCampaign(body) {
+  return sendJSON("POST", "/api/campaigns", body);
+}
+
+export function updateCampaign(id, body) {
+  return sendJSON("PATCH", `/api/campaigns/${id}`, body);
+}
+
+export function fetchFilterFields(source) {
+  return getJSON(`/api/campaigns/meta/fields?source=${encodeURIComponent(source)}`);
+}
+
+export function fetchFilterValues(source, field) {
+  const params = new URLSearchParams({ source, field });
+  return getJSON(`/api/campaigns/meta/values?${params.toString()}`);
+}
+
+export function previewCampaignSend(id, filter) {
+  return sendJSON("POST", `/api/campaigns/${id}/preview`, { filter });
+}
+
+export function enrollCampaign(id, filter) {
+  return sendJSON("POST", `/api/campaigns/${id}/enroll`, { filter });
+}
+
+export function fetchEnrollments(id, status = "", page = 1) {
+  const params = new URLSearchParams({ page });
+  if (status) params.set("status", status);
+  return getJSON(`/api/campaigns/${id}/enrollments?${params.toString()}`);
 }

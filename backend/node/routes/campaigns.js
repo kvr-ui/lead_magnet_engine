@@ -1,9 +1,81 @@
 const express = require("express");
 const Campaign = require("../models/Campaign");
 const CampaignEnrollment = require("../models/CampaignEnrollment");
-const { enrollTargets } = require("../lib/campaignEngine");
+const Contact = require("../models/Contact");
+const Lead = require("../models/Lead");
+const { getAdMagnetConnection } = require("../db");
+const { enrollTargets, previewTargets } = require("../lib/campaignEngine");
 
 const router = express.Router();
+
+// Filterable fields per target source, for the UI's field-picker. Mirrors the
+// columns already shown in ZohoTab.jsx/CaGuruTab.jsx.
+const SOURCE_FIELDS = {
+  Contact: [
+    { key: "caStatus", label: "CA Level" },
+    { key: "city", label: "City" },
+    { key: "attempt", label: "Attempt" },
+    { key: "potential", label: "Potential" },
+    { key: "status", label: "Status" },
+    { key: "leadSource", label: "Lead Source" },
+    { key: "ownerName", label: "Owner" },
+  ],
+  Lead: [{ key: "leadMagnet", label: "Lead Magnet" }],
+  AdMagnetStudent: [
+    { key: "caLevel", label: "CA Level" },
+    { key: "city", label: "City" },
+    { key: "attemptGiven", label: "Attempt" },
+  ],
+};
+
+const VALUES_CAP = 200;
+
+// Distinct values (+ counts) for one field of one source — powers the
+// filter builder's value dropdown. `field` is checked against SOURCE_FIELDS
+// (a whitelist) before being interpolated into the aggregation pipeline.
+async function distinctValues(source, field) {
+  const fields = SOURCE_FIELDS[source];
+  if (!fields) throw new Error(`Unknown source "${source}"`);
+  if (!fields.some((f) => f.key === field)) {
+    throw new Error(`Field "${field}" is not filterable for source "${source}"`);
+  }
+
+  const pipeline = [
+    { $group: { _id: `$${field}`, count: { $sum: 1 } } },
+    { $match: { _id: { $nin: [null, ""] } } },
+    { $sort: { count: -1 } },
+    { $limit: VALUES_CAP },
+  ];
+
+  let rows;
+  if (source === "Contact") {
+    rows = await Contact.aggregate(pipeline);
+  } else if (source === "Lead") {
+    rows = await Lead.aggregate(pipeline);
+  } else {
+    const conn = getAdMagnetConnection();
+    if (!conn) throw new Error("AD_MAGNET_MONGODB_URI not configured");
+    rows = await conn.db.collection("users").aggregate(pipeline).toArray();
+  }
+  return rows.map((r) => ({ value: r._id, count: r.count }));
+}
+
+// GET /api/campaigns/meta/fields?source=Contact|Lead|AdMagnetStudent
+router.get("/campaigns/meta/fields", (req, res) => {
+  const fields = SOURCE_FIELDS[req.query.source];
+  if (!fields) return res.status(400).json({ error: `Unknown source "${req.query.source}"` });
+  res.json({ fields });
+});
+
+// GET /api/campaigns/meta/values?source=...&field=...
+router.get("/campaigns/meta/values", async (req, res) => {
+  try {
+    const values = await distinctValues(req.query.source, req.query.field);
+    res.json({ values });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
 
 // POST /api/campaigns — create a drip campaign.
 // Body: { name, description?, targetModel: "Contact"|"Lead",
@@ -50,6 +122,20 @@ router.patch("/campaigns/:id", async (req, res) => {
     res.json(campaign);
   } catch (err) {
     res.status(400).json({ error: "Failed to update campaign", detail: err.message });
+  }
+});
+
+// POST /api/campaigns/:id/preview — count-only dry run of an enroll (no writes).
+// Body: { filter?: {...} } — same shape as /enroll. Returns matched/willEnroll/
+// skipped counts so the UI can show them before the confirm dialog.
+router.post("/campaigns/:id/preview", async (req, res) => {
+  const campaign = await Campaign.findById(req.params.id);
+  if (!campaign) return res.status(404).json({ error: "Campaign not found" });
+  try {
+    const result = await previewTargets(campaign, req.body?.filter || {});
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: "Preview failed", detail: err.message });
   }
 });
 

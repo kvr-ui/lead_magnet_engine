@@ -19,7 +19,7 @@ const historyEntrySchema = new Schema(
 const enrollmentSchema = new Schema(
   {
     campaign: { type: Schema.Types.ObjectId, ref: "Campaign", required: true, index: true },
-    targetModel: { type: String, enum: ["Contact", "Lead"], required: true },
+    targetModel: { type: String, enum: ["Contact", "Lead", "AdMagnetStudent"], required: true },
     targetId: { type: Schema.Types.ObjectId, required: true },
     phone: { type: String, required: true, trim: true },
     status: {

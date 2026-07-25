@@ -1,6 +1,7 @@
 import { useState } from "react";
 import CaGuruTab from "./CaGuruTab";
 import ZohoTab from "./ZohoTab";
+import CampaignsTab from "./CampaignsTab";
 
 export default function App() {
   const [tab, setTab] = useState("ca-guru");
@@ -15,8 +16,13 @@ export default function App() {
         <button type="button" className={`tab ${tab === "zoho" ? "active" : ""}`} onClick={() => setTab("zoho")}>
           Zoho Contacts
         </button>
+        <button type="button" className={`tab ${tab === "campaigns" ? "active" : ""}`} onClick={() => setTab("campaigns")}>
+          Campaigns
+        </button>
       </div>
-      {tab === "ca-guru" ? <CaGuruTab /> : <ZohoTab />}
+      {tab === "ca-guru" && <CaGuruTab />}
+      {tab === "zoho" && <ZohoTab />}
+      {tab === "campaigns" && <CampaignsTab />}
     </div>
   );
 }
