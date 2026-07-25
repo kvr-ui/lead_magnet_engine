@@ -1,4 +1,9 @@
 const { Schema, model } = require("mongoose");
+const { DYNAMIC_PREFIX } = require("../lib/sourceFields");
+
+const STATIC_TARGET_MODELS = ["Contact", "Lead", "AdMagnetStudent"];
+// Besides the built-in sources, any user-connected Data Source ("datasource:<id>") is a valid target.
+const isValidTargetModel = (v) => STATIC_TARGET_MODELS.includes(v) || v.startsWith(DYNAMIC_PREFIX);
 
 /**
  * A drip campaign: an ordered sequence of WhatsApp template messages sent to
@@ -23,7 +28,11 @@ const campaignSchema = new Schema(
   {
     name: { type: String, required: true, trim: true, unique: true },
     description: { type: String, trim: true },
-    targetModel: { type: String, enum: ["Contact", "Lead", "AdMagnetStudent"], required: true },
+    targetModel: {
+      type: String,
+      required: true,
+      validate: { validator: isValidTargetModel, message: (props) => `"${props.value}" is not a valid targetModel` },
+    },
     // Channel identifier from the connected provider (see
     // whatsappProvider.getChannels()) — "" sends from the provider's
     // default channel.

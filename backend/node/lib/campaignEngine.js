@@ -5,6 +5,7 @@ const Lead = require("../models/Lead");
 const { getAdMagnetConnection } = require("../db");
 const { cleanPhone } = require("./phone");
 const whatsappProvider = require("./whatsappProvider");
+const { DYNAMIC_PREFIX } = require("./sourceFields");
 
 // How many due enrollments to send per poll tick, and the gap between sends —
 // keeps us well under the connected provider's rate limits instead of firing
@@ -54,7 +55,50 @@ const adapters = {
   },
 };
 
-function getAdapter(targetModel) {
+// Candidate field names (checked case-insensitively against the connection's
+// discovered fields) for the phone number on a user-connected Data Source —
+// there's no per-connection config for this, so it's guessed from common
+// naming conventions.
+const PHONE_FIELD_CANDIDATES = ["phone", "phonenumber", "mobile", "mobilenumber", "contactnumber", "whatsappnumber"];
+
+function guessPhoneField(fieldsCache) {
+  const byLower = new Map((fieldsCache || []).map((k) => [k.toLowerCase(), k]));
+  for (const candidate of PHONE_FIELD_CANDIDATES) {
+    if (byLower.has(candidate)) return byLower.get(candidate);
+  }
+  return null;
+}
+
+// User-connected Data Source ("datasource:<id>") — same shape as the static
+// adapters above, but built on demand since which collection holds the
+// target isn't known ahead of time.
+async function dynamicAdapter(targetModel) {
+  const id = targetModel.slice(DYNAMIC_PREFIX.length);
+  const DataSourceConnection = require("../models/DataSourceConnection");
+  const { getConnectionFor } = require("./dataSourcePool");
+
+  const doc = await DataSourceConnection.findById(id);
+  if (!doc || !doc.active) throw new Error("Unknown or inactive data source");
+  const phoneField = guessPhoneField(doc.fieldsCache);
+  if (!phoneField) throw new Error(`Couldn't find a phone field on data source "${doc.label}"`);
+
+  const conn = await getConnectionFor(doc);
+  const collection = conn.db.collection(doc.collectionName);
+
+  return {
+    async find(filter) {
+      const docs = await collection.find(filter || {}).project({ [phoneField]: 1 }).toArray();
+      return docs.map((d) => ({ _id: d._id, phone: d[phoneField] }));
+    },
+    async findById(id) {
+      const doc = await collection.findOne({ _id: id });
+      return doc ? { ...doc, phone: doc[phoneField] } : null;
+    },
+  };
+}
+
+async function getAdapter(targetModel) {
+  if (targetModel.startsWith(DYNAMIC_PREFIX)) return dynamicAdapter(targetModel);
   const adapter = adapters[targetModel];
   if (!adapter) throw new Error(`Unknown targetModel: ${targetModel}`);
   return adapter;
@@ -64,7 +108,7 @@ function getAdapter(targetModel) {
 // everything matching `filter`, cleans phone numbers, and checks which are
 // already enrolled in this campaign.
 async function matchTargets(campaign, filter) {
-  const adapter = getAdapter(campaign.targetModel);
+  const adapter = await getAdapter(campaign.targetModel);
   const targets = await adapter.find(filter || {});
   const matched = targets.length;
 
@@ -152,7 +196,7 @@ async function enrollTargets(campaign, filter) {
 // next step (or mark it completed if that was the last one).
 async function advanceEnrollment(enrollment, campaign) {
   const step = campaign.steps[enrollment.currentStepIndex];
-  const adapter = getAdapter(enrollment.targetModel);
+  const adapter = await getAdapter(enrollment.targetModel);
   const targetDoc = await adapter.findById(enrollment.targetId);
 
   if (!targetDoc) {

@@ -2,15 +2,7 @@ const express = require("express");
 const DataSourceConnection = require("../models/DataSourceConnection");
 const { encrypt } = require("../lib/crypto");
 const { testConnection, evict, getConnectionFor, listDatabases, listCollections } = require("../lib/dataSourcePool");
-const { getSourceFields, sampleFieldKeys, ALWAYS_EXCLUDED, DYNAMIC_PREFIX } = require("../lib/sourceFields");
-
-// Same fields hidden from the field-picker are stripped from the raw
-// documents too — otherwise something like phoneOtp just isn't offered as a
-// column, but still goes out over the wire in the JSON response. _id stays
-// (the frontend table keys rows on it).
-const DOCUMENT_PROJECTION = Object.fromEntries(
-  [...ALWAYS_EXCLUDED].filter((key) => key !== "_id").map((key) => [key, 0])
-);
+const { getSourceFields, sampleFieldKeys, DYNAMIC_PREFIX, DOCUMENT_PROJECTION } = require("../lib/sourceFields");
 const { validateFilter } = require("../lib/sourceData");
 
 const router = express.Router();
@@ -66,13 +58,40 @@ router.post("/data-sources/discover-databases", async (req, res) => {
   }
 });
 
+// Sentinel collectionName meaning "connect every collection in the database"
+// instead of just one — each becomes its own DataSourceConnection.
+const ALL_COLLECTIONS = "*";
+
+async function connectOneCollection({ label, mongoUri, databaseName, collectionName }) {
+  await testConnection({ mongoUri, databaseName, collectionName });
+  const doc = await DataSourceConnection.create({
+    label,
+    mongoUriEncrypted: encrypt(mongoUri),
+    databaseName,
+    collectionName,
+    status: "connected",
+    lastTestedAt: new Date(),
+  });
+  let fieldsCache = [];
+  try {
+    fieldsCache = await refreshFieldsCache(doc);
+  } catch (err) {
+    // Connection tested fine above but sampling failed (e.g. empty
+    // collection) — keep the connection, just leave fields empty for now.
+    console.warn(`DataSourceConnection ${doc._id} field sampling failed:`, err.message);
+  }
+  return { ...sanitize(doc), fieldsCache };
+}
+
 // POST /api/data-sources — connect a new external Mongo collection.
 // Body: { label, mongoUri, databaseName?, collectionName? }
 // collectionName is optional: if omitted, the database's collections are
 // discovered and used automatically when there's exactly one. If there's
 // more than one, the request is rejected with 409 + the discovered list so
 // the UI can ask the admin to pick — we never guess which one is "the" data.
-// Tests the connection before ever persisting the URI.
+// Pass collectionName: "*" to connect every discovered collection at once,
+// one DataSourceConnection per collection (each labeled "<label> — <collection>").
+// Tests each connection before ever persisting its URI.
 router.post("/data-sources", async (req, res) => {
   const { label, mongoUri, databaseName } = req.body || {};
   let { collectionName } = req.body || {};
@@ -99,32 +118,37 @@ router.post("/data-sources", async (req, res) => {
     collectionName = discovered[0];
   }
 
-  try {
-    await testConnection({ mongoUri, databaseName, collectionName });
-  } catch (err) {
-    return res.status(400).json({ error: "Connection test failed", detail: err.message });
+  if (collectionName === ALL_COLLECTIONS) {
+    let discovered;
+    try {
+      discovered = await listCollections({ mongoUri, databaseName });
+    } catch (err) {
+      return res.status(400).json({ error: "Connection failed", detail: err.message });
+    }
+    if (discovered.length === 0) {
+      return res.status(400).json({ error: "No collections found in that database" });
+    }
+
+    const results = [];
+    const failures = [];
+    for (const name of discovered) {
+      try {
+        results.push(await connectOneCollection({ label: `${label} — ${name}`, mongoUri, databaseName, collectionName: name }));
+      } catch (err) {
+        failures.push({ collectionName: name, error: err.message });
+      }
+    }
+    if (!results.length) {
+      return res.status(400).json({ error: "Failed to connect any collection", failures });
+    }
+    return res.status(201).json({ connections: results, failures, maskedUri: maskUri(mongoUri) });
   }
 
   try {
-    const doc = await DataSourceConnection.create({
-      label,
-      mongoUriEncrypted: encrypt(mongoUri),
-      databaseName,
-      collectionName,
-      status: "connected",
-      lastTestedAt: new Date(),
-    });
-    let fieldsCache = [];
-    try {
-      fieldsCache = await refreshFieldsCache(doc);
-    } catch (err) {
-      // Connection tested fine above but sampling failed (e.g. empty
-      // collection) — keep the connection, just leave fields empty for now.
-      console.warn(`DataSourceConnection ${doc._id} field sampling failed:`, err.message);
-    }
-    res.status(201).json({ ...sanitize(doc), fieldsCache, maskedUri: maskUri(mongoUri) });
+    const result = await connectOneCollection({ label, mongoUri, databaseName, collectionName });
+    res.status(201).json({ ...result, maskedUri: maskUri(mongoUri) });
   } catch (err) {
-    res.status(400).json({ error: "Failed to save data source", detail: err.message });
+    res.status(400).json({ error: "Connection test failed", detail: err.message });
   }
 });
 

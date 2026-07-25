@@ -1,4 +1,8 @@
 const { Schema, model } = require("mongoose");
+const { DYNAMIC_PREFIX } = require("../lib/sourceFields");
+
+const STATIC_TARGET_MODELS = ["Contact", "Lead", "AdMagnetStudent"];
+const isValidTargetModel = (v) => STATIC_TARGET_MODELS.includes(v) || v.startsWith(DYNAMIC_PREFIX);
 
 /**
  * One target's (Contact or Lead) progress through a Campaign. Created in bulk
@@ -19,7 +23,11 @@ const historyEntrySchema = new Schema(
 const enrollmentSchema = new Schema(
   {
     campaign: { type: Schema.Types.ObjectId, ref: "Campaign", required: true, index: true },
-    targetModel: { type: String, enum: ["Contact", "Lead", "AdMagnetStudent"], required: true },
+    targetModel: {
+      type: String,
+      required: true,
+      validate: { validator: isValidTargetModel, message: (props) => `"${props.value}" is not a valid targetModel` },
+    },
     targetId: { type: Schema.Types.ObjectId, required: true },
     phone: { type: String, required: true, trim: true },
     status: {

@@ -3,7 +3,7 @@ const Campaign = require("../models/Campaign");
 const CampaignEnrollment = require("../models/CampaignEnrollment");
 const { enrollTargets, previewTargets, sendSingleMessage } = require("../lib/campaignEngine");
 const whatsappProvider = require("../lib/whatsappProvider");
-const { getSourceFields } = require("../lib/sourceFields");
+const { getSourceFields, DYNAMIC_PREFIX, DOCUMENT_PROJECTION } = require("../lib/sourceFields");
 const { getSourceHandle, validateFilter } = require("../lib/sourceData");
 
 const router = express.Router();
@@ -61,7 +61,7 @@ async function listMembers(source, filter, page, limit) {
     return { members, total };
   }
 
-  const projection = MEMBER_PROJECTIONS[source];
+  const projection = MEMBER_PROJECTIONS[source] || (source.startsWith(DYNAMIC_PREFIX) ? DOCUMENT_PROJECTION : null);
   const cursor = handle.collection.find(filter);
   if (projection) cursor.project(projection);
   const [members, total] = await Promise.all([

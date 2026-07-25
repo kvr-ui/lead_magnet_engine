@@ -97,4 +97,13 @@ async function getSourceFields(source) {
   return keys.map((key) => ({ key, label: humanize(key) }));
 }
 
-module.exports = { getSourceFields, sampleFieldKeys, humanize, ALWAYS_EXCLUDED, DYNAMIC_PREFIX };
+// Same fields hidden from the field-picker are stripped from raw documents
+// too — shared by the data-source documents endpoint and campaign member
+// listing so an excluded field like phoneOtp never goes out over the wire
+// just because a caller skipped the field-picker's whitelist. _id stays (the
+// frontend tables key rows on it).
+const DOCUMENT_PROJECTION = Object.fromEntries(
+  [...ALWAYS_EXCLUDED].filter((key) => key !== "_id").map((key) => [key, 0])
+);
+
+module.exports = { getSourceFields, sampleFieldKeys, humanize, ALWAYS_EXCLUDED, DYNAMIC_PREFIX, DOCUMENT_PROJECTION };
