@@ -39,6 +39,8 @@ const leadsRouter = require("./routes/leads");
 const adminRouter = require("./routes/admin");
 const contactsRouter = require("./routes/contacts");
 const adMagnetRouter = require("./routes/adMagnet");
+const campaignsRouter = require("./routes/campaigns");
+const { startScheduler } = require("./lib/campaignEngine");
 
 const ADMIN_UI_DIST = path.join(__dirname, "..", "..", "frontend", "admin-ui", "dist");
 
@@ -63,6 +65,7 @@ app.use(express.urlencoded({ extended: false }));
 app.use(express.text({ type: ["text/csv", "text/plain"], limit: "50mb" }));
 app.use("/api", leadsRouter);
 app.use("/api", contactsRouter);
+app.use("/api", campaignsRouter);
 app.use("/api/ad-magnet", adMagnetRouter);
 app.use("/admin", adminRouter);
 // React leads dashboard (admin-ui/), built via `npm run build` in that folder.
@@ -82,6 +85,7 @@ async function start() {
   await connectDB();
   await connectAdMagnetDB();
   await initLeadMagnets();
+  startScheduler();
   app.listen(PORT, HOST, () => {
     console.log(`Express proxy listening on http://${HOST}:${PORT}`);
     console.log(`Forwarding to Python backend at ${PY_TARGET}`);
