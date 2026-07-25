@@ -6,6 +6,7 @@
  * provider later means a new adapter module + a new `type` value here, not
  * a rewrite of the campaign/route layer.
  */
+const crypto = require("crypto");
 const WhatsAppIntegration = require("../models/WhatsAppIntegration");
 const { encrypt, decrypt } = require("./crypto");
 const wati = require("./watiClient");
@@ -55,6 +56,7 @@ async function connect({ endpoint, token, channels }) {
   await wati.getMessageTemplates({ endpoint, token }); // throws if creds are bad
 
   await WhatsAppIntegration.updateMany({ active: true }, { $set: { active: false } });
+  const existing = await WhatsAppIntegration.findOne({ type: "wati" });
   const doc = await WhatsAppIntegration.findOneAndUpdate(
     { type: "wati" },
     {
@@ -65,6 +67,9 @@ async function connect({ endpoint, token, channels }) {
         channels: channels || [],
         active: true,
         connectedAt: new Date(),
+        // Keep the same secret across reconnects so a previously-registered
+        // WATI webhook URL doesn't silently break.
+        webhookSecret: existing?.webhookSecret || crypto.randomBytes(24).toString("hex"),
       },
     },
     { upsert: true, returnDocument: "after" }
@@ -76,6 +81,14 @@ async function disconnect() {
   await WhatsAppIntegration.updateMany({ active: true }, { $set: { active: false } });
 }
 
+// Looked up by routes/wati.js to verify the shared secret on inbound webhook
+// calls. Checks the secret directly against Mongo (not the request's own
+// active-doc lookup) since a webhook call carries no other identifying info.
+async function findBySecret(secret) {
+  if (!secret) return null;
+  return WhatsAppIntegration.findOne({ webhookSecret: secret, active: true });
+}
+
 function status(doc) {
   if (!doc) return { connected: false };
   return {
@@ -83,6 +96,7 @@ function status(doc) {
     type: doc.type,
     endpoint: doc.apiEndpoint,
     channels: doc.channels.map((c) => ({ id: c.id, label: c.label || c.id })),
+    webhookSecret: doc.webhookSecret,
   };
 }
 
@@ -91,4 +105,13 @@ async function getStatus() {
   return status(doc);
 }
 
-module.exports = { isConfigured, getChannels, getTemplates, sendMessage, connect, disconnect, status: getStatus };
+module.exports = {
+  isConfigured,
+  getChannels,
+  getTemplates,
+  sendMessage,
+  connect,
+  disconnect,
+  status: getStatus,
+  findBySecret,
+};

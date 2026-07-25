@@ -23,6 +23,10 @@ const whatsAppIntegrationSchema = new Schema(
     channels: { type: [channelSchema], default: [] },
     active: { type: Boolean, default: false },
     connectedAt: { type: Date },
+    // Shared secret WATI must send back on webhook calls (as ?secret= or
+    // x-webhook-secret header) so /api/wati/webhook can verify the sender.
+    // Generated once on first connect and kept stable across reconnects.
+    webhookSecret: { type: String, required: true },
   },
   { timestamps: true }
 );

@@ -83,6 +83,20 @@ export default function IntegrationsTab() {
             <button type="button" className="secondary-btn" onClick={handleDisconnect}>
               Disconnect
             </button>
+
+            {status.webhookSecret && (
+              <div className="panel" style={{ marginTop: "1rem" }}>
+                <h4>Webhook (delivery, read, reply tracking)</h4>
+                <p className="muted">
+                  Paste this URL into WATI → Team Inbox Settings → Webhook Settings so we can track what happens
+                  after a campaign message is sent.
+                </p>
+                <label className="form-row">
+                  Webhook URL
+                  <input readOnly value={`${window.location.origin}/api/wati/webhook?secret=${status.webhookSecret}`} onFocus={(e) => e.target.select()} />
+                </label>
+              </div>
+            )}
           </>
         ) : (
           <p className="muted">Not connected — campaign sending is paused until a provider is connected below.</p>
