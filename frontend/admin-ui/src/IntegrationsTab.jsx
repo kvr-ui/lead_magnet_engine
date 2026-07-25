@@ -9,6 +9,7 @@ export default function IntegrationsTab() {
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [copied, setCopied] = useState(false);
 
   const [endpoint, setEndpoint] = useState("");
   const [token, setToken] = useState("");
@@ -94,7 +95,24 @@ export default function IntegrationsTab() {
                 </p>
                 <label className="form-row">
                   Webhook URL
-                  <input readOnly value={`${window.location.origin}/api/wati/webhook?secret=${status.webhookSecret}`} onFocus={(e) => e.target.select()} />
+                  <div className="condition-row">
+                    <input
+                      readOnly
+                      value={`${window.location.origin}/api/wati/webhook?secret=${status.webhookSecret}`}
+                      onFocus={(e) => e.target.select()}
+                    />
+                    <button
+                      type="button"
+                      className="secondary-btn"
+                      onClick={() => {
+                        navigator.clipboard.writeText(`${window.location.origin}/api/wati/webhook?secret=${status.webhookSecret}`);
+                        setCopied(true);
+                        setTimeout(() => setCopied(false), 2000);
+                      }}
+                    >
+                      {copied ? "Copied!" : "Copy"}
+                    </button>
+                  </div>
                 </label>
               </div>
             )}
