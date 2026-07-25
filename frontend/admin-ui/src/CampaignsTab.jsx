@@ -5,9 +5,13 @@ import {
   updateCampaign,
   fetchFilterFields,
   fetchFilterValues,
+  fetchSegmentMembers,
+  fetchTemplates,
+  fetchChannels,
   previewCampaignSend,
   enrollCampaign,
   fetchEnrollments,
+  sendSingleMessage,
 } from "./api";
 import LeadsTable from "./LeadsTable";
 import Pager from "./Pager";
@@ -15,8 +19,31 @@ import Pager from "./Pager";
 const SOURCES = ["Contact", "Lead", "AdMagnetStudent"];
 const SOURCE_LABELS = { Contact: "Zoho Contacts", Lead: "Lead Magnet Leads", AdMagnetStudent: "CA Guru Students" };
 
+const SOURCE_COLUMNS = {
+  Contact: [
+    { key: "name", header: "Name", get: (d) => d.name },
+    { key: "phone", header: "Phone", get: (d) => d.phone },
+    { key: "caStatus", header: "CA Level", get: (d) => d.caStatus },
+    { key: "city", header: "City", get: (d) => d.city },
+    { key: "status", header: "Status", get: (d) => d.status },
+  ],
+  Lead: [
+    { key: "name", header: "Name", get: (d) => d.name },
+    { key: "phone", header: "Phone", get: (d) => d.phone },
+    { key: "email", header: "Email", get: (d) => d.email },
+    { key: "leadMagnet", header: "Lead Magnet", get: (d) => d.leadMagnet },
+  ],
+  AdMagnetStudent: [
+    { key: "name", header: "Name", get: (d) => d.name },
+    { key: "phoneNumber", header: "Phone", get: (d) => d.phoneNumber },
+    { key: "email", header: "Email", get: (d) => d.email },
+    { key: "city", header: "City", get: (d) => d.city },
+    { key: "caLevel", header: "CA Level", get: (d) => d.caLevel },
+  ],
+};
+
 function emptyStep() {
-  return { delayHours: 0, templateName: "", broadcastName: "", params: [] };
+  return { templateName: "", broadcastName: "" };
 }
 
 // --- Create campaign form ---------------------------------------------
@@ -25,25 +52,26 @@ function CreateCampaignForm({ onCreated, onCancel }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [targetModel, setTargetModel] = useState("Contact");
+  const [channelNumber, setChannelNumber] = useState("");
   const [steps, setSteps] = useState([emptyStep()]);
   const [error, setError] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [templates, setTemplates] = useState([]);
+  const [templatesError, setTemplatesError] = useState(null);
+  const [channels, setChannels] = useState([]);
+  const [channelsError, setChannelsError] = useState(null);
+
+  useEffect(() => {
+    fetchTemplates()
+      .then((d) => setTemplates(d.templates))
+      .catch((err) => setTemplatesError(err.message));
+    fetchChannels()
+      .then((d) => setChannels(d.channels))
+      .catch((err) => setChannelsError(err.message));
+  }, []);
 
   function updateStep(i, patch) {
     setSteps(steps.map((s, idx) => (idx === i ? { ...s, ...patch } : s)));
-  }
-
-  function addParam(i) {
-    updateStep(i, { params: [...steps[i].params, { type: "static", value: "" }] });
-  }
-
-  function updateParam(i, pi, patch) {
-    const params = steps[i].params.map((p, idx) => (idx === pi ? { ...p, ...patch } : p));
-    updateStep(i, { params });
-  }
-
-  function removeParam(i, pi) {
-    updateStep(i, { params: steps[i].params.filter((_, idx) => idx !== pi) });
   }
 
   async function handleSubmit(e) {
@@ -55,7 +83,8 @@ function CreateCampaignForm({ onCreated, onCancel }) {
         name,
         description,
         targetModel,
-        steps: steps.map((s) => ({ ...s, delayHours: Number(s.delayHours) || 0 })),
+        channelNumber,
+        steps,
       });
       onCreated();
     } catch (err) {
@@ -91,6 +120,19 @@ function CreateCampaignForm({ onCreated, onCancel }) {
         </select>
       </label>
 
+      <label className="form-row">
+        Send from (WhatsApp number)
+        {channelsError && <p className="error">{channelsError}</p>}
+        <select value={channelNumber} onChange={(e) => setChannelNumber(e.target.value)} required>
+          <option value="">Pick a number…</option>
+          {channels.map((c) => (
+            <option key={c.number} value={c.number}>
+              {c.name}
+            </option>
+          ))}
+        </select>
+      </label>
+
       <h4>Steps</h4>
       {steps.map((step, i) => (
         <div className="step-card" key={i}>
@@ -104,47 +146,26 @@ function CreateCampaignForm({ onCreated, onCancel }) {
           </div>
 
           <label className="form-row">
-            Delay before this step (hours){i === 0 ? " — 0 = send on enroll" : ""}
-            <input
-              type="number"
-              min="0"
-              value={step.delayHours}
-              onChange={(e) => updateStep(i, { delayHours: e.target.value })}
-            />
-          </label>
-
-          <label className="form-row">
             WATI template name
-            <input value={step.templateName} onChange={(e) => updateStep(i, { templateName: e.target.value })} required />
+            {templatesError && <p className="error">{templatesError}</p>}
+            <select
+              value={step.templateName}
+              onChange={(e) => updateStep(i, { templateName: e.target.value })}
+              required
+            >
+              <option value="">Pick a template…</option>
+              {templates.map((t) => (
+                <option key={t.name} value={t.name}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
           </label>
 
           <label className="form-row">
             WATI broadcast name
             <input value={step.broadcastName} onChange={(e) => updateStep(i, { broadcastName: e.target.value })} required />
           </label>
-
-          <div className="form-row">
-            Template params (in order, filling {"{{1}}"}, {"{{2}}"}, …)
-            {step.params.map((p, pi) => (
-              <div className="param-row" key={pi}>
-                <select value={p.type} onChange={(e) => updateParam(i, pi, { type: e.target.value })}>
-                  <option value="static">static text</option>
-                  <option value="field">from field</option>
-                </select>
-                <input
-                  placeholder={p.type === "field" ? "field name, e.g. name" : "literal text"}
-                  value={p.value}
-                  onChange={(e) => updateParam(i, pi, { value: e.target.value })}
-                />
-                <button type="button" className="link-btn" onClick={() => removeParam(i, pi)}>
-                  remove
-                </button>
-              </div>
-            ))}
-            <button type="button" className="link-btn" onClick={() => addParam(i)}>
-              + add param
-            </button>
-          </div>
         </div>
       ))}
       <button type="button" className="secondary-btn" onClick={() => setSteps([...steps, emptyStep()])}>
@@ -159,6 +180,86 @@ function CreateCampaignForm({ onCreated, onCancel }) {
           Cancel
         </button>
       </div>
+    </form>
+  );
+}
+
+// --- Send to a single number --------------------------------------------
+
+function SendToNumberForm() {
+  const [phone, setPhone] = useState("");
+  const [templateName, setTemplateName] = useState("");
+  const [broadcastName, setBroadcastName] = useState("");
+  const [channelNumber, setChannelNumber] = useState("");
+  const [templates, setTemplates] = useState([]);
+  const [channels, setChannels] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    fetchTemplates()
+      .then((d) => setTemplates(d.templates))
+      .catch(() => {});
+    fetchChannels()
+      .then((d) => setChannels(d.channels))
+      .catch(() => {});
+  }, []);
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setError(null);
+    setResult(null);
+    setBusy(true);
+    try {
+      await sendSingleMessage({ phone, templateName, broadcastName, channelNumber });
+      setResult(`Sent to ${phone}.`);
+      setPhone("");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form className="panel" onSubmit={handleSubmit}>
+      <h3>Send to a single number</h3>
+      <div className="condition-row">
+        <select value={templateName} onChange={(e) => setTemplateName(e.target.value)} required>
+          <option value="">Pick a template…</option>
+          {templates.map((t) => (
+            <option key={t.name} value={t.name}>
+              {t.name}
+            </option>
+          ))}
+        </select>
+        <input
+          placeholder="Broadcast name"
+          value={broadcastName}
+          onChange={(e) => setBroadcastName(e.target.value)}
+          required
+        />
+        <select value={channelNumber} onChange={(e) => setChannelNumber(e.target.value)}>
+          <option value="">Pick a number…</option>
+          {channels.map((c) => (
+            <option key={c.number} value={c.number}>
+              {c.name}
+            </option>
+          ))}
+        </select>
+        <input
+          placeholder="Mobile number"
+          value={phone}
+          onChange={(e) => setPhone(e.target.value)}
+          required
+        />
+        <button type="submit" disabled={busy}>
+          {busy ? "Sending…" : "Send"}
+        </button>
+      </div>
+      {error && <p className="error">{error}</p>}
+      {result && <p className="notice">{result}</p>}
     </form>
   );
 }
@@ -255,6 +356,10 @@ function CampaignDetail({ campaign, onClose, onChanged }) {
   const [page, setPage] = useState(1);
   const [enrollments, setEnrollments] = useState({ enrollments: [], total: 0, totalPages: 1 });
 
+  const [membersPage, setMembersPage] = useState(1);
+  const [members, setMembers] = useState({ members: [], total: 0, totalPages: 1 });
+  const [membersError, setMembersError] = useState(null);
+
   const filter = buildMongoFilter(conditions);
   const filterKey = JSON.stringify(filter);
 
@@ -263,6 +368,15 @@ function CampaignDetail({ campaign, onClose, onChanged }) {
       .then(setEnrollments)
       .catch(() => {});
   }, [campaign._id, statusFilter, page, enrollResult]);
+
+  useEffect(() => setMembersPage(1), [filterKey]);
+
+  useEffect(() => {
+    setMembersError(null);
+    fetchSegmentMembers(campaign.targetModel, filter, membersPage)
+      .then(setMembers)
+      .catch((err) => setMembersError(err.message));
+  }, [campaign.targetModel, filterKey, membersPage]);
 
   async function handlePreview() {
     setError(null);
@@ -319,7 +433,10 @@ function CampaignDetail({ campaign, onClose, onChanged }) {
     <div className="panel">
       <div className="step-card-head">
         <h3>
-          {campaign.name} <span className="muted">— {SOURCE_LABELS[campaign.targetModel]}</span>
+          {campaign.name}{" "}
+          <span className="muted">
+            — {SOURCE_LABELS[campaign.targetModel]} · sends from {campaign.channelNumber ? campaign.channelNumber : "Default number"}
+          </span>
         </h3>
         <div>
           <button type="button" className="secondary-btn" onClick={toggleActive}>
@@ -347,6 +464,15 @@ function CampaignDetail({ campaign, onClose, onChanged }) {
         + add condition
       </button>
       {!conditions.length && <p className="muted">No conditions — sending will target everyone in this source.</p>}
+
+      <h4>Matching members</h4>
+      <Pager page={members.page || membersPage} totalPages={members.totalPages} total={members.total} onChange={setMembersPage} />
+      <LeadsTable
+        columns={SOURCE_COLUMNS[campaign.targetModel]}
+        rows={members.members}
+        loading={false}
+        error={membersError}
+      />
 
       {error && <p className="error">{error}</p>}
 
@@ -413,6 +539,8 @@ export default function CampaignsTab() {
 
       {!selected && (
         <>
+          <SendToNumberForm />
+
           <button type="button" className="secondary-btn" onClick={() => setShowCreate(!showCreate)}>
             {showCreate ? "Cancel" : "+ New campaign"}
           </button>

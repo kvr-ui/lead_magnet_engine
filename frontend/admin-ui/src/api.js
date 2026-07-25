@@ -66,3 +66,20 @@ export function fetchEnrollments(id, status = "", page = 1) {
   if (status) params.set("status", status);
   return getJSON(`/api/campaigns/${id}/enrollments?${params.toString()}`);
 }
+
+export function fetchSegmentMembers(source, filter, page = 1) {
+  const params = new URLSearchParams({ source, page, filter: JSON.stringify(filter || {}) });
+  return getJSON(`/api/campaigns/meta/members?${params.toString()}`);
+}
+
+export function fetchTemplates() {
+  return getJSON("/api/campaigns/meta/templates");
+}
+
+export function fetchChannels() {
+  return getJSON("/api/campaigns/meta/channels");
+}
+
+export function sendSingleMessage({ phone, templateName, broadcastName, channelNumber }) {
+  return sendJSON("POST", "/api/campaigns/send-message", { phone, templateName, broadcastName, channelNumber });
+}

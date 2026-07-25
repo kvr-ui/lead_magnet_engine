@@ -59,16 +59,6 @@ function getAdapter(targetModel) {
   return adapter;
 }
 
-// Resolve a step's template params against the enrolled target document —
-// "field" params pull a property off it, "static" params are used verbatim.
-function resolveParams(step, targetDoc) {
-  return (step.params || []).map((p) => {
-    if (p.type === "static") return p.value;
-    const v = targetDoc?.[p.value];
-    return v === undefined || v === null ? "" : String(v);
-  });
-}
-
 // Shared by previewTargets (read-only) and enrollTargets (writes): finds
 // everything matching `filter`, cleans phone numbers, and checks which are
 // already enrolled in this campaign.
@@ -125,9 +115,7 @@ async function previewTargets(campaign, filter) {
 async function enrollTargets(campaign, filter) {
   const { cleaned, ...counts } = await matchTargets(campaign, filter);
 
-  const firstStep = campaign.steps[0];
-  const now = new Date();
-  const nextSendAt = new Date(now.getTime() + (firstStep.delayHours || 0) * 3600 * 1000);
+  const nextSendAt = new Date();
 
   const ops = cleaned.map((t) => ({
     updateOne: {
@@ -184,7 +172,8 @@ async function advanceEnrollment(enrollment, campaign) {
       phone: enrollment.phone,
       templateName: step.templateName,
       broadcastName: step.broadcastName,
-      params: resolveParams(step, targetDoc),
+      params: [],
+      channelNumber: campaign.channelNumber,
     });
     enrollment.history.push({
       stepIndex: enrollment.currentStepIndex,
@@ -197,7 +186,7 @@ async function advanceEnrollment(enrollment, campaign) {
     const nextStep = campaign.steps[nextIndex];
     if (nextStep) {
       enrollment.currentStepIndex = nextIndex;
-      enrollment.nextSendAt = new Date(Date.now() + (nextStep.delayHours || 0) * 3600 * 1000);
+      enrollment.nextSendAt = new Date();
     } else {
       enrollment.status = "completed";
     }
@@ -213,6 +202,14 @@ async function advanceEnrollment(enrollment, campaign) {
   }
 
   await enrollment.save();
+}
+
+// Send one WhatsApp template message to one phone number directly — no
+// campaign, no enrollment, just a single fire-and-forget send.
+async function sendSingleMessage({ phone: rawPhone, templateName, broadcastName, channelNumber }) {
+  const phone = cleanPhone(rawPhone);
+  if (!phone) throw new Error(`"${rawPhone}" is not a valid phone number`);
+  return wati.sendTemplateMessage({ phone, templateName, broadcastName, params: [], channelNumber });
 }
 
 // One poll tick: find due, active enrollments (campaign still active) and
@@ -249,4 +246,4 @@ function startScheduler() {
   console.log(`[campaignEngine] polling every ${POLL_INTERVAL_MS}ms for due drip messages`);
 }
 
-module.exports = { enrollTargets, previewTargets, processDueEnrollments, startScheduler };
+module.exports = { enrollTargets, previewTargets, sendSingleMessage, processDueEnrollments, startScheduler };
