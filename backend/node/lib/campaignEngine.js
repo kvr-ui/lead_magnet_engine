@@ -4,10 +4,11 @@ const Contact = require("../models/Contact");
 const Lead = require("../models/Lead");
 const { getAdMagnetConnection } = require("../db");
 const { cleanPhone } = require("./phone");
-const wati = require("./watiClient");
+const whatsappProvider = require("./whatsappProvider");
 
 // How many due enrollments to send per poll tick, and the gap between sends —
-// keeps us well under WATI's rate limits instead of firing a burst.
+// keeps us well under the connected provider's rate limits instead of firing
+// a burst.
 const BATCH_SIZE = parseInt(process.env.CAMPAIGN_BATCH_SIZE, 10) || 20;
 const SEND_GAP_MS = parseInt(process.env.CAMPAIGN_SEND_GAP_MS, 10) || 1000;
 const POLL_INTERVAL_MS = parseInt(process.env.CAMPAIGN_POLL_INTERVAL_MS, 10) || 5 * 60 * 1000;
@@ -158,7 +159,7 @@ async function advanceEnrollment(enrollment, campaign) {
     enrollment.status = "failed";
     enrollment.history.push({
       stepIndex: enrollment.currentStepIndex,
-      templateName: step.templateName,
+      templateId: step.templateId,
       sentAt: new Date(),
       status: "error",
       error: "Target document no longer exists",
@@ -168,16 +169,16 @@ async function advanceEnrollment(enrollment, campaign) {
   }
 
   try {
-    await wati.sendTemplateMessage({
+    await whatsappProvider.sendMessage({
       phone: enrollment.phone,
-      templateName: step.templateName,
-      broadcastName: step.broadcastName,
+      templateId: step.templateId,
+      meta: step.providerMeta,
       params: [],
-      channelNumber: campaign.channelNumber,
+      channelId: campaign.channelId,
     });
     enrollment.history.push({
       stepIndex: enrollment.currentStepIndex,
-      templateName: step.templateName,
+      templateId: step.templateId,
       sentAt: new Date(),
       status: "sent",
     });
@@ -193,7 +194,7 @@ async function advanceEnrollment(enrollment, campaign) {
   } catch (err) {
     enrollment.history.push({
       stepIndex: enrollment.currentStepIndex,
-      templateName: step.templateName,
+      templateId: step.templateId,
       sentAt: new Date(),
       status: "error",
       error: err.message,
@@ -206,16 +207,17 @@ async function advanceEnrollment(enrollment, campaign) {
 
 // Send one WhatsApp template message to one phone number directly — no
 // campaign, no enrollment, just a single fire-and-forget send.
-async function sendSingleMessage({ phone: rawPhone, templateName, broadcastName, channelNumber }) {
+async function sendSingleMessage({ phone: rawPhone, templateId, providerMeta, channelId }) {
   const phone = cleanPhone(rawPhone);
   if (!phone) throw new Error(`"${rawPhone}" is not a valid phone number`);
-  return wati.sendTemplateMessage({ phone, templateName, broadcastName, params: [], channelNumber });
+  return whatsappProvider.sendMessage({ phone, templateId, meta: providerMeta, params: [], channelId });
 }
 
 // One poll tick: find due, active enrollments (campaign still active) and
-// send/advance each in turn, spaced out to respect WATI's rate limits.
+// send/advance each in turn, spaced out to respect the connected provider's
+// rate limits.
 async function processDueEnrollments() {
-  if (!wati.isConfigured()) return { processed: 0, skipped: "WATI not configured" };
+  if (!(await whatsappProvider.isConfigured())) return { processed: 0, skipped: "No WhatsApp provider connected" };
 
   const due = await CampaignEnrollment.find({ status: "active", nextSendAt: { $lte: new Date() } })
     .sort({ nextSendAt: 1 })
@@ -234,16 +236,16 @@ async function processDueEnrollments() {
 
 let pollHandle = null;
 
+// Always polls, regardless of whether a provider is connected at boot —
+// the connection can be made/broken later from the Integrations tab without
+// a restart, and processDueEnrollments() already no-ops per tick when
+// nothing's connected.
 function startScheduler() {
   if (pollHandle) return;
-  if (!wati.isConfigured()) {
-    console.log("[campaignEngine] WATI_API_ENDPOINT/WATI_API_TOKEN not set — drip campaign sending disabled");
-    return;
-  }
   pollHandle = setInterval(() => {
     processDueEnrollments().catch((err) => console.error("[campaignEngine] poll error:", err.message));
   }, POLL_INTERVAL_MS);
-  console.log(`[campaignEngine] polling every ${POLL_INTERVAL_MS}ms for due drip messages`);
+  console.log(`[campaignEngine] polling every ${POLL_INTERVAL_MS}ms for due drip messages (when a provider is connected)`);
 }
 
 module.exports = { enrollTargets, previewTargets, sendSingleMessage, processDueEnrollments, startScheduler };

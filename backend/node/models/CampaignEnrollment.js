@@ -8,7 +8,7 @@ const { Schema, model } = require("mongoose");
 const historyEntrySchema = new Schema(
   {
     stepIndex: { type: Number, required: true },
-    templateName: { type: String, required: true },
+    templateId: { type: String, required: true },
     sentAt: { type: Date, required: true },
     status: { type: String, enum: ["sent", "error"], required: true },
     error: { type: String },

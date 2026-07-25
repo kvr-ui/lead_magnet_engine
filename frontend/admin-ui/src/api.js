@@ -80,6 +80,20 @@ export function fetchChannels() {
   return getJSON("/api/campaigns/meta/channels");
 }
 
-export function sendSingleMessage({ phone, templateName, broadcastName, channelNumber }) {
-  return sendJSON("POST", "/api/campaigns/send-message", { phone, templateName, broadcastName, channelNumber });
+export function sendSingleMessage({ phone, templateId, providerMeta, channelId }) {
+  return sendJSON("POST", "/api/campaigns/send-message", { phone, templateId, providerMeta, channelId });
+}
+
+// --- WhatsApp provider integration -------------------------------------
+
+export function fetchIntegrationStatus() {
+  return getJSON("/api/integrations/whatsapp");
+}
+
+export function connectWhatsApp({ endpoint, token, channels }) {
+  return sendJSON("POST", "/api/integrations/whatsapp/connect", { endpoint, token, channels });
+}
+
+export function disconnectWhatsApp() {
+  return sendJSON("POST", "/api/integrations/whatsapp/disconnect");
 }

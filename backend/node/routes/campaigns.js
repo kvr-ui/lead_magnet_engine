@@ -5,7 +5,7 @@ const Contact = require("../models/Contact");
 const Lead = require("../models/Lead");
 const { getAdMagnetConnection } = require("../db");
 const { enrollTargets, previewTargets, sendSingleMessage } = require("../lib/campaignEngine");
-const wati = require("../lib/watiClient");
+const whatsappProvider = require("../lib/whatsappProvider");
 
 const router = express.Router();
 
@@ -127,21 +127,28 @@ router.get("/campaigns/meta/members", async (req, res) => {
   }
 });
 
-// GET /api/campaigns/meta/templates — approved WATI template names, for the
-// campaign builder's template picker (instead of free-typing a name).
+// GET /api/campaigns/meta/templates — approved template list from the
+// connected provider, for the campaign builder's template picker (instead
+// of free-typing a name). Returns connected: false instead of erroring when
+// nothing's connected, so the UI can point at the Integrations tab.
 router.get("/campaigns/meta/templates", async (_req, res) => {
   try {
-    const templates = await wati.getMessageTemplates();
-    res.json({ templates });
+    if (!(await whatsappProvider.isConfigured())) {
+      return res.json({ templates: [], connected: false });
+    }
+    const templates = await whatsappProvider.getTemplates();
+    res.json({ templates, connected: true });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
 });
 
-// GET /api/campaigns/meta/channels — WhatsApp numbers on this WATI account,
+// GET /api/campaigns/meta/channels — channels on the connected provider,
 // for the campaign builder's "send from" picker.
-router.get("/campaigns/meta/channels", (_req, res) => {
-  res.json({ channels: wati.getChannels() });
+router.get("/campaigns/meta/channels", async (_req, res) => {
+  const connected = await whatsappProvider.isConfigured();
+  const channels = connected ? await whatsappProvider.getChannels() : [];
+  res.json({ channels, connected });
 });
 
 // GET /api/campaigns/meta/fields?source=Contact|Lead|AdMagnetStudent
@@ -163,7 +170,7 @@ router.get("/campaigns/meta/values", async (req, res) => {
 
 // POST /api/campaigns — create a drip campaign.
 // Body: { name, description?, targetModel: "Contact"|"Lead",
-//         steps: [{ templateName, broadcastName, params?: [{type:"field"|"static", value}] }] }
+//         steps: [{ templateId, providerMeta? }] }
 router.post("/campaigns", async (req, res) => {
   try {
     const campaign = await Campaign.create(req.body);
@@ -239,14 +246,17 @@ router.post("/campaigns/:id/enroll", async (req, res) => {
 
 // POST /api/campaigns/send-message — send one WhatsApp template message to
 // one phone number directly, no campaign or enrollment involved.
-// Body: { phone, templateName, broadcastName, channelNumber? }
+// Body: { phone, templateId, providerMeta?, channelId? }
 router.post("/campaigns/send-message", async (req, res) => {
   try {
-    const { phone, templateName, broadcastName, channelNumber } = req.body || {};
-    if (!templateName || !broadcastName) {
-      return res.status(400).json({ error: "templateName and broadcastName are required" });
+    const { phone, templateId, providerMeta, channelId } = req.body || {};
+    if (!templateId) {
+      return res.status(400).json({ error: "templateId is required" });
     }
-    const result = await sendSingleMessage({ phone, templateName, broadcastName, channelNumber });
+    if (!(await whatsappProvider.isConfigured())) {
+      return res.status(400).json({ error: "No WhatsApp provider connected — connect one from the Integrations tab" });
+    }
+    const result = await sendSingleMessage({ phone, templateId, providerMeta, channelId });
     res.status(201).json(result);
   } catch (err) {
     res.status(400).json({ error: "Send failed", detail: err.message });

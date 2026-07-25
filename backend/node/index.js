@@ -40,8 +40,11 @@ const adminRouter = require("./routes/admin");
 const contactsRouter = require("./routes/contacts");
 const adMagnetRouter = require("./routes/adMagnet");
 const campaignsRouter = require("./routes/campaigns");
+const integrationsRouter = require("./routes/integrations");
 const { startScheduler } = require("./lib/campaignEngine");
 const { requireAdminAuth } = require("./lib/adminAuth");
+const whatsappProvider = require("./lib/whatsappProvider");
+const WhatsAppIntegration = require("./models/WhatsAppIntegration");
 
 const ADMIN_UI_DIST = path.join(__dirname, "..", "..", "frontend", "admin-ui", "dist");
 
@@ -67,6 +70,7 @@ app.use(express.text({ type: ["text/csv", "text/plain"], limit: "50mb" }));
 app.use("/api", leadsRouter);
 app.use("/api", contactsRouter);
 app.use("/api", requireAdminAuth, campaignsRouter);
+app.use("/api", requireAdminAuth, integrationsRouter);
 app.use("/api/ad-magnet", requireAdminAuth, adMagnetRouter);
 app.use("/admin", requireAdminAuth, adminRouter);
 // React leads dashboard (admin-ui/), built via `npm run build` in that folder.
@@ -82,10 +86,40 @@ app.use(
   })
 );
 
+// One-time bootstrap: if nothing's been connected via the Integrations tab
+// yet but WATI_* env vars are set (the old hardcoded config), migrate them
+// into an active WhatsAppIntegration doc so upgrading doesn't break existing
+// sends. After this runs once, the env vars are no longer read — the UI
+// becomes the source of truth.
+async function migrateWatiEnvConfigIfNeeded() {
+  const endpoint = (process.env.WATI_API_ENDPOINT || "").replace(/\/+$/, "");
+  const token = process.env.WATI_API_TOKEN || "";
+  if (!endpoint || !token) return;
+  if ((await WhatsAppIntegration.countDocuments()) > 0) return;
+
+  const channels = [];
+  let i = 1;
+  while (true) {
+    const key = i === 1 ? "CHANNEL_NUMBER" : `CHANNEL_NUMBER_${i}`;
+    const number = (process.env[key] || "").trim();
+    if (!number) break;
+    channels.push({ id: number, label: i === 1 ? `${number} (Default)` : number });
+    i++;
+  }
+
+  try {
+    await whatsappProvider.connect({ endpoint, token, channels });
+    console.log("[whatsappProvider] Migrated WATI_* env config into MongoDB — manage the connection from the Integrations tab going forward.");
+  } catch (err) {
+    console.warn(`[whatsappProvider] Auto-migration from .env failed: ${err.message}`);
+  }
+}
+
 async function start() {
   await connectDB();
   await connectAdMagnetDB();
   await initLeadMagnets();
+  await migrateWatiEnvConfigIfNeeded();
   startScheduler();
   app.listen(PORT, HOST, () => {
     console.log(`Express proxy listening on http://${HOST}:${PORT}`);

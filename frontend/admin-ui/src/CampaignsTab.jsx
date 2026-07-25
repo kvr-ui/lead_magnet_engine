@@ -43,7 +43,11 @@ const SOURCE_COLUMNS = {
 };
 
 function emptyStep() {
-  return { templateName: "", broadcastName: "" };
+  return { templateId: "", broadcastName: "" };
+}
+
+function toApiStep(step) {
+  return { templateId: step.templateId, providerMeta: { broadcastName: step.broadcastName } };
 }
 
 // --- Create campaign form ---------------------------------------------
@@ -52,7 +56,7 @@ function CreateCampaignForm({ onCreated, onCancel }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [targetModel, setTargetModel] = useState("Contact");
-  const [channelNumber, setChannelNumber] = useState("");
+  const [channelId, setChannelId] = useState("");
   const [steps, setSteps] = useState([emptyStep()]);
   const [error, setError] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -60,13 +64,20 @@ function CreateCampaignForm({ onCreated, onCancel }) {
   const [templatesError, setTemplatesError] = useState(null);
   const [channels, setChannels] = useState([]);
   const [channelsError, setChannelsError] = useState(null);
+  const [providerConnected, setProviderConnected] = useState(true);
 
   useEffect(() => {
     fetchTemplates()
-      .then((d) => setTemplates(d.templates))
+      .then((d) => {
+        setTemplates(d.templates);
+        if (d.connected === false) setProviderConnected(false);
+      })
       .catch((err) => setTemplatesError(err.message));
     fetchChannels()
-      .then((d) => setChannels(d.channels))
+      .then((d) => {
+        setChannels(d.channels);
+        if (d.connected === false) setProviderConnected(false);
+      })
       .catch((err) => setChannelsError(err.message));
   }, []);
 
@@ -83,8 +94,8 @@ function CreateCampaignForm({ onCreated, onCancel }) {
         name,
         description,
         targetModel,
-        channelNumber,
-        steps,
+        channelId,
+        steps: steps.map(toApiStep),
       });
       onCreated();
     } catch (err) {
@@ -98,6 +109,9 @@ function CreateCampaignForm({ onCreated, onCancel }) {
     <form className="panel" onSubmit={handleSubmit}>
       <h3>New campaign</h3>
       {error && <p className="error">{error}</p>}
+      {!providerConnected && (
+        <p className="error">No WhatsApp provider connected — connect one from the Integrations tab first.</p>
+      )}
 
       <label className="form-row">
         Name
@@ -121,13 +135,13 @@ function CreateCampaignForm({ onCreated, onCancel }) {
       </label>
 
       <label className="form-row">
-        Send from (WhatsApp number)
+        Send from (channel)
         {channelsError && <p className="error">{channelsError}</p>}
-        <select value={channelNumber} onChange={(e) => setChannelNumber(e.target.value)} required>
-          <option value="">Pick a number…</option>
+        <select value={channelId} onChange={(e) => setChannelId(e.target.value)} required>
+          <option value="">Pick a channel…</option>
           {channels.map((c) => (
-            <option key={c.number} value={c.number}>
-              {c.name}
+            <option key={c.id} value={c.id}>
+              {c.label}
             </option>
           ))}
         </select>
@@ -146,24 +160,24 @@ function CreateCampaignForm({ onCreated, onCancel }) {
           </div>
 
           <label className="form-row">
-            WATI template name
+            Template name
             {templatesError && <p className="error">{templatesError}</p>}
             <select
-              value={step.templateName}
-              onChange={(e) => updateStep(i, { templateName: e.target.value })}
+              value={step.templateId}
+              onChange={(e) => updateStep(i, { templateId: e.target.value })}
               required
             >
               <option value="">Pick a template…</option>
               {templates.map((t) => (
-                <option key={t.name} value={t.name}>
-                  {t.name}
+                <option key={t.id} value={t.id}>
+                  {t.id}
                 </option>
               ))}
             </select>
           </label>
 
           <label className="form-row">
-            WATI broadcast name
+            Broadcast name
             <input value={step.broadcastName} onChange={(e) => updateStep(i, { broadcastName: e.target.value })} required />
           </label>
         </div>
@@ -188,21 +202,28 @@ function CreateCampaignForm({ onCreated, onCancel }) {
 
 function SendToNumberForm() {
   const [phone, setPhone] = useState("");
-  const [templateName, setTemplateName] = useState("");
+  const [templateId, setTemplateId] = useState("");
   const [broadcastName, setBroadcastName] = useState("");
-  const [channelNumber, setChannelNumber] = useState("");
+  const [channelId, setChannelId] = useState("");
   const [templates, setTemplates] = useState([]);
   const [channels, setChannels] = useState([]);
+  const [connected, setConnected] = useState(true);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
 
   useEffect(() => {
     fetchTemplates()
-      .then((d) => setTemplates(d.templates))
+      .then((d) => {
+        setTemplates(d.templates);
+        if (d.connected === false) setConnected(false);
+      })
       .catch(() => {});
     fetchChannels()
-      .then((d) => setChannels(d.channels))
+      .then((d) => {
+        setChannels(d.channels);
+        if (d.connected === false) setConnected(false);
+      })
       .catch(() => {});
   }, []);
 
@@ -212,7 +233,7 @@ function SendToNumberForm() {
     setResult(null);
     setBusy(true);
     try {
-      await sendSingleMessage({ phone, templateName, broadcastName, channelNumber });
+      await sendSingleMessage({ phone, templateId, providerMeta: { broadcastName }, channelId });
       setResult(`Sent to ${phone}.`);
       setPhone("");
     } catch (err) {
@@ -222,15 +243,24 @@ function SendToNumberForm() {
     }
   }
 
+  if (!connected) {
+    return (
+      <div className="panel">
+        <h3>Send to a single number</h3>
+        <p className="error">No WhatsApp provider connected — connect one from the Integrations tab first.</p>
+      </div>
+    );
+  }
+
   return (
     <form className="panel" onSubmit={handleSubmit}>
       <h3>Send to a single number</h3>
       <div className="condition-row">
-        <select value={templateName} onChange={(e) => setTemplateName(e.target.value)} required>
+        <select value={templateId} onChange={(e) => setTemplateId(e.target.value)} required>
           <option value="">Pick a template…</option>
           {templates.map((t) => (
-            <option key={t.name} value={t.name}>
-              {t.name}
+            <option key={t.id} value={t.id}>
+              {t.id}
             </option>
           ))}
         </select>
@@ -240,11 +270,11 @@ function SendToNumberForm() {
           onChange={(e) => setBroadcastName(e.target.value)}
           required
         />
-        <select value={channelNumber} onChange={(e) => setChannelNumber(e.target.value)}>
-          <option value="">Pick a number…</option>
+        <select value={channelId} onChange={(e) => setChannelId(e.target.value)}>
+          <option value="">Pick a channel…</option>
           {channels.map((c) => (
-            <option key={c.number} value={c.number}>
-              {c.name}
+            <option key={c.id} value={c.id}>
+              {c.label}
             </option>
           ))}
         </select>
@@ -435,7 +465,7 @@ function CampaignDetail({ campaign, onClose, onChanged }) {
         <h3>
           {campaign.name}{" "}
           <span className="muted">
-            — {SOURCE_LABELS[campaign.targetModel]} · sends from {campaign.channelNumber ? campaign.channelNumber : "Default number"}
+            — {SOURCE_LABELS[campaign.targetModel]} · sends from {campaign.channelId ? campaign.channelId : "Default channel"}
           </span>
         </h3>
         <div>
