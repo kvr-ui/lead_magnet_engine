@@ -12,18 +12,16 @@ async function sendJSON(method, url, data) {
     body: JSON.stringify(data ?? {}),
   });
   const body = await res.json();
-  if (!res.ok) throw new Error(body.detail || body.error || `Request failed: ${res.status}`);
+  if (!res.ok) {
+    const err = new Error(body.detail || body.error || `Request failed: ${res.status}`);
+    // Some endpoints (e.g. data-source create with an ambiguous collection)
+    // attach extra structured info to the error body — expose it so callers
+    // can react beyond just the message.
+    err.status = res.status;
+    err.body = body;
+    throw err;
+  }
   return body;
-}
-
-export function fetchAdMagnetStudents(page, search = "") {
-  const params = new URLSearchParams({ page });
-  if (search) params.set("search", search);
-  return getJSON(`/api/ad-magnet/students?${params.toString()}`);
-}
-
-export function fetchAdMagnetStudentFields() {
-  return getJSON("/api/ad-magnet/students/fields");
 }
 
 export function fetchContacts(page, pageSize = 50) {
@@ -93,6 +91,10 @@ export function sendSingleMessage({ phone, templateId, providerMeta, channelId }
 }
 
 // --- Generic lead-magnet data source connections ------------------------
+
+export function discoverDataSourceDatabases({ mongoUri }) {
+  return sendJSON("POST", "/api/data-sources/discover-databases", { mongoUri });
+}
 
 export function fetchDataSources() {
   return getJSON("/api/data-sources");

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   fetchCampaigns,
   createCampaign,
@@ -10,15 +10,19 @@ import {
   enrollCampaign,
   fetchEnrollments,
   sendSingleMessage,
+  fetchDataSources,
+  fetchDataSourceFields,
 } from "./api";
 import LeadsTable from "./LeadsTable";
 import Pager from "./Pager";
 import FilterCondition, { buildMongoFilter } from "./FilterBuilder";
 
-const SOURCES = ["Contact", "Lead", "AdMagnetStudent"];
-const SOURCE_LABELS = { Contact: "Zoho Contacts", Lead: "Lead Magnet Leads", AdMagnetStudent: "CA Guru Students" };
+const DYNAMIC_PREFIX = "datasource:";
 
-const SOURCE_COLUMNS = {
+const STATIC_SOURCES = ["Contact", "Lead"];
+const STATIC_SOURCE_LABELS = { Contact: "Zoho Contacts", Lead: "Lead Magnet Leads" };
+
+const STATIC_SOURCE_COLUMNS = {
   Contact: [
     { key: "name", header: "Name", get: (d) => d.name },
     { key: "phone", header: "Phone", get: (d) => d.phone },
@@ -32,13 +36,6 @@ const SOURCE_COLUMNS = {
     { key: "email", header: "Email", get: (d) => d.email },
     { key: "leadMagnet", header: "Lead Magnet", get: (d) => d.leadMagnet },
   ],
-  AdMagnetStudent: [
-    { key: "name", header: "Name", get: (d) => d.name },
-    { key: "phoneNumber", header: "Phone", get: (d) => d.phoneNumber },
-    { key: "email", header: "Email", get: (d) => d.email },
-    { key: "city", header: "City", get: (d) => d.city },
-    { key: "caLevel", header: "CA Level", get: (d) => d.caLevel },
-  ],
 };
 
 function emptyStep() {
@@ -51,7 +48,7 @@ function toApiStep(step) {
 
 // --- Create campaign form ---------------------------------------------
 
-function CreateCampaignForm({ onCreated, onCancel }) {
+function CreateCampaignForm({ sources, onCreated, onCancel }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [targetModel, setTargetModel] = useState("Contact");
@@ -125,9 +122,9 @@ function CreateCampaignForm({ onCreated, onCancel }) {
       <label className="form-row">
         Target source
         <select value={targetModel} onChange={(e) => setTargetModel(e.target.value)}>
-          {SOURCES.map((s) => (
-            <option key={s} value={s}>
-              {SOURCE_LABELS[s]}
+          {sources.map((s) => (
+            <option key={s.value} value={s.value}>
+              {s.label}
             </option>
           ))}
         </select>
@@ -295,7 +292,7 @@ function SendToNumberForm() {
 
 // --- Campaign detail: filter, preview, send, enrollments -----------------
 
-function CampaignDetail({ campaign, onClose, onChanged }) {
+function CampaignDetail({ campaign, sourceLabels, onClose, onChanged }) {
   const [conditions, setConditions] = useState([]);
   const [preview, setPreview] = useState(null);
   const [previewedKey, setPreviewedKey] = useState(null);
@@ -310,6 +307,21 @@ function CampaignDetail({ campaign, onClose, onChanged }) {
   const [membersPage, setMembersPage] = useState(1);
   const [members, setMembers] = useState({ members: [], total: 0, totalPages: 1 });
   const [membersError, setMembersError] = useState(null);
+
+  const [dynamicColumns, setDynamicColumns] = useState(null);
+  useEffect(() => {
+    if (!campaign.targetModel.startsWith(DYNAMIC_PREFIX)) {
+      setDynamicColumns(null);
+      return;
+    }
+    const id = campaign.targetModel.slice(DYNAMIC_PREFIX.length);
+    fetchDataSourceFields(id)
+      .then((d) =>
+        setDynamicColumns(d.fields.slice(0, 6).map((f) => ({ key: f.key, header: f.label || f.key, get: (doc) => doc[f.key] })))
+      )
+      .catch(() => setDynamicColumns([]));
+  }, [campaign.targetModel]);
+  const columns = campaign.targetModel.startsWith(DYNAMIC_PREFIX) ? dynamicColumns || [] : STATIC_SOURCE_COLUMNS[campaign.targetModel];
 
   const filter = buildMongoFilter(conditions);
   const filterKey = JSON.stringify(filter);
@@ -346,7 +358,7 @@ function CampaignDetail({ campaign, onClose, onChanged }) {
   async function handleSend() {
     if (!preview) return;
     const confirmed = window.confirm(
-      `Send "${campaign.name}" to ${preview.willEnroll} ${SOURCE_LABELS[campaign.targetModel]}?\n\n` +
+      `Send "${campaign.name}" to ${preview.willEnroll} ${sourceLabels[campaign.targetModel] || campaign.targetModel}?\n\n` +
         `${preview.matched} matched, ${preview.alreadyEnrolled} already enrolled, ` +
         `${preview.skippedNoPhone + preview.skippedBadPhone} skipped (no/invalid phone).`
     );
@@ -386,7 +398,8 @@ function CampaignDetail({ campaign, onClose, onChanged }) {
         <h3>
           {campaign.name}{" "}
           <span className="muted">
-            — {SOURCE_LABELS[campaign.targetModel]} · sends from {campaign.channelId ? campaign.channelId : "Default channel"}
+            — {sourceLabels[campaign.targetModel] || campaign.targetModel} · sends from{" "}
+            {campaign.channelId ? campaign.channelId : "Default channel"}
           </span>
         </h3>
         <div>
@@ -419,7 +432,7 @@ function CampaignDetail({ campaign, onClose, onChanged }) {
       <h4>Matching members</h4>
       <Pager page={members.page || membersPage} totalPages={members.totalPages} total={members.total} onChange={setMembersPage} />
       <LeadsTable
-        columns={SOURCE_COLUMNS[campaign.targetModel]}
+        columns={columns}
         rows={members.members}
         loading={false}
         error={membersError}
@@ -473,6 +486,7 @@ export default function CampaignsTab() {
   const [error, setError] = useState(null);
   const [showCreate, setShowCreate] = useState(false);
   const [selectedId, setSelectedId] = useState(null);
+  const [dataSources, setDataSources] = useState([]);
 
   function reload() {
     fetchCampaigns()
@@ -481,6 +495,24 @@ export default function CampaignsTab() {
   }
 
   useEffect(reload, []);
+  useEffect(() => {
+    fetchDataSources()
+      .then(setDataSources)
+      .catch(() => setDataSources([]));
+  }, []);
+
+  // Every connected, active Data Source is a valid campaign target alongside
+  // the two built-in sources — labeled with whatever the admin named it on
+  // the Data Sources tab, so it's identifiable here instead of a generic
+  // bucket name.
+  const sources = useMemo(
+    () => [
+      ...STATIC_SOURCES.map((s) => ({ value: s, label: STATIC_SOURCE_LABELS[s] })),
+      ...dataSources.filter((ds) => ds.active).map((ds) => ({ value: `${DYNAMIC_PREFIX}${ds._id}`, label: ds.label })),
+    ],
+    [dataSources]
+  );
+  const sourceLabels = useMemo(() => Object.fromEntries(sources.map((s) => [s.value, s.label])), [sources]);
 
   const selected = campaigns.find((c) => c._id === selectedId);
 
@@ -498,6 +530,7 @@ export default function CampaignsTab() {
 
           {showCreate && (
             <CreateCampaignForm
+              sources={sources}
               onCreated={() => {
                 setShowCreate(false);
                 reload();
@@ -523,7 +556,7 @@ export default function CampaignsTab() {
                 {campaigns.map((c) => (
                   <tr key={c._id} className="clickable-row" onClick={() => setSelectedId(c._id)}>
                     <td>{c.name}</td>
-                    <td>{SOURCE_LABELS[c.targetModel]}</td>
+                    <td>{sourceLabels[c.targetModel] || c.targetModel}</td>
                     <td>{c.steps.length}</td>
                     <td>{c.active ? "active" : "paused"}</td>
                     <td>{c.enrollments.active || 0}</td>
@@ -541,6 +574,7 @@ export default function CampaignsTab() {
       {selected && (
         <CampaignDetail
           campaign={selected}
+          sourceLabels={sourceLabels}
           onClose={() => setSelectedId(null)}
           onChanged={reload}
         />
