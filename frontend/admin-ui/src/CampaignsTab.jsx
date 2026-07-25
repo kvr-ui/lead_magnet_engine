@@ -317,7 +317,7 @@ function CampaignDetail({ campaign, sourceLabels, onClose, onChanged }) {
     const id = campaign.targetModel.slice(DYNAMIC_PREFIX.length);
     fetchDataSourceFields(id)
       .then((d) =>
-        setDynamicColumns(d.fields.slice(0, 6).map((f) => ({ key: f.key, header: f.label || f.key, get: (doc) => doc[f.key] })))
+        setDynamicColumns(d.fields.map((f) => ({ key: f.key, header: f.label || f.key, get: (doc) => doc[f.key] })))
       )
       .catch(() => setDynamicColumns([]));
   }, [campaign.targetModel]);
