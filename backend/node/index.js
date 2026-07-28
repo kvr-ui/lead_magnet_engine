@@ -45,6 +45,7 @@ const dataSourcesRouter = require("./routes/dataSources");
 const settingsRouter = require("./routes/settings");
 const watiRouter = require("./routes/wati");
 const messageEventsRouter = require("./routes/messageEvents");
+const activityRouter = require("./routes/activity");
 const { startScheduler } = require("./lib/campaignEngine");
 const { requireAdminAuth } = require("./lib/adminAuth");
 const whatsappProvider = require("./lib/whatsappProvider");
@@ -78,6 +79,10 @@ app.use("/api", requireAdminAuth, campaignsRouter);
 // Reads back what watiRouter's webhook writes. Behind admin auth on purpose —
 // the webhook itself can't be, but nothing that exposes the data should be.
 app.use("/api", requireAdminAuth, messageEventsRouter);
+// Reads the lead magnet's own database to say what leads did after a send.
+// Read-only across the connection, and admin-only like everything that
+// exposes lead data.
+app.use("/api", requireAdminAuth, activityRouter);
 app.use("/api", requireAdminAuth, integrationsRouter);
 app.use("/api", requireAdminAuth, dataSourcesRouter);
 app.use("/api", requireAdminAuth, settingsRouter);

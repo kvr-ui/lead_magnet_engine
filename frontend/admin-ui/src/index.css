@@ -693,6 +693,156 @@ select:focus-visible {
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
+/* --- Lead activity after a send ----------------------------------------
+   The step past delivery: not whether the message landed, but whether the
+   lead then went and used the product. Styled as flat stat tiles rather than
+   a funnel — these stages aren't cumulative the way sent/delivered/read are. */
+
+.activity-panel {
+  margin: 0.75rem 0 1.25rem;
+}
+
+.activity-window {
+  display: block;
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  margin-bottom: 0.75rem;
+}
+
+.activity-window select {
+  width: auto;
+  display: inline-block;
+  margin: 0 0.15rem;
+}
+
+.activity-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.activity-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  padding: 0.6rem 0.75rem;
+}
+
+.activity-stat-value {
+  font-size: 1.5rem;
+  font-weight: 600;
+  line-height: 1.1;
+}
+
+.activity-stat-label {
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+}
+
+.activity-stat-sub {
+  font-size: 0.75rem;
+}
+
+/* One lead's individual answers. The left border carries right/wrong at a
+   glance, so a long list is scannable without reading every verdict line. */
+
+.answer-list {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.answer-list > li {
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border-soft);
+  border-left-width: 3px;
+  border-radius: var(--radius-md);
+  padding: 0.6rem 0.75rem;
+}
+
+.answer-list > li.answer-correct {
+  border-left-color: var(--success);
+}
+
+.answer-list > li.answer-wrong {
+  border-left-color: var(--danger);
+}
+
+.answer-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  font-size: 0.8125rem;
+  margin-bottom: 0.4rem;
+}
+
+.answer-question {
+  line-height: 1.5;
+  margin-bottom: 0.5rem;
+}
+
+.answer-options {
+  list-style: none;
+  margin: 0 0 0.5rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.875rem;
+}
+
+.answer-options li {
+  padding: 0.3rem 0.5rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+}
+
+/* The lead's pick and the right answer are marked separately: when they got
+   it wrong both are highlighted, which is the whole point of showing them. */
+.answer-options li.option-picked {
+  background: var(--danger-soft);
+  border-color: var(--danger);
+}
+
+.answer-options li.option-right {
+  background: var(--success-soft);
+  border-color: var(--success);
+}
+
+.answer-options li.option-picked.option-right {
+  background: var(--success-soft);
+  border-color: var(--success);
+}
+
+.option-tag {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.answer-verdict {
+  font-size: 0.8125rem;
+}
+
+.answer-explanation {
+  margin-top: 0.4rem;
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.answer-explanation summary {
+  cursor: pointer;
+  color: var(--accent);
+}
+
 /* --- WhatsApp delivery reporting --------------------------------------- */
 
 .delivery-funnel {
@@ -786,6 +936,49 @@ select:focus-visible {
   border-radius: var(--radius-sm);
   color: var(--text-primary);
   white-space: pre-wrap;
+}
+
+/* Key/value detail lists in the send panel. Auto-fit rather than a fixed
+   column count: a lead record from a connected source can have three fields or
+   thirty, and either should fill the width without leaving gaps. */
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 0.5rem 1.25rem;
+  margin: 0.5rem 0 1rem;
+}
+
+.detail-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.detail-row dt {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.detail-row dd {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  /* Provider message ids are long unbroken strings and would otherwise push
+     the panel wider than the viewport. */
+  overflow-wrap: anywhere;
+}
+
+.timeline-panel h5 {
+  margin: 1rem 0 0;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
 }
 
 .field-picker {

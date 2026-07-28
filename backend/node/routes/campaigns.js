@@ -234,6 +234,27 @@ router.patch("/campaigns/:id", async (req, res) => {
   }
 });
 
+// DELETE /api/campaigns/:id — remove a campaign and every enrollment in it.
+//
+// The enrollments go too, deliberately. Left behind they would be both
+// unreachable and permanently stalled: the poller loads each due enrollment's
+// campaign per tick and skips it when the campaign is gone, so they would sit
+// "active" forever without ever sending again.
+//
+// MessageEvents are kept. They record what WhatsApp actually reported for
+// messages that really were sent, and deleting the campaign doesn't unsend
+// them — the delivery log stays truthful about what reached people, even once
+// the campaign that sent it is gone.
+router.delete("/campaigns/:id", async (req, res) => {
+  const campaign = await Campaign.findById(req.params.id);
+  if (!campaign) return res.status(404).json({ error: "Campaign not found" });
+
+  const { deletedCount } = await CampaignEnrollment.deleteMany({ campaign: campaign._id });
+  await campaign.deleteOne();
+
+  res.json({ deleted: true, name: campaign.name, enrollmentsDeleted: deletedCount || 0 });
+});
+
 // POST /api/campaigns/:id/preview — count-only dry run of an enroll (no writes).
 // Body: { filter?: {...} } — same shape as /enroll. Returns matched/willEnroll/
 // skipped counts so the UI can show them before the confirm dialog.

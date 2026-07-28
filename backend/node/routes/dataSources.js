@@ -25,6 +25,7 @@ function sanitize(doc) {
     fieldsCachedAt: doc.fieldsCachedAt,
     lastTestedAt: doc.lastTestedAt,
     enrich: doc.enrich,
+    activity: doc.activity,
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
   };
@@ -197,7 +198,7 @@ router.patch("/data-sources/:id", async (req, res) => {
   const doc = await DataSourceConnection.findById(req.params.id);
   if (!doc) return res.status(404).json({ error: "Data source not found" });
 
-  const { label, mongoUri, databaseName, collectionName, active, enrich } = req.body || {};
+  const { label, mongoUri, databaseName, collectionName, active, enrich, activity } = req.body || {};
   const credentialsChanged =
     mongoUri !== undefined ||
     (databaseName !== undefined && databaseName !== doc.databaseName) ||
@@ -239,6 +240,56 @@ router.patch("/data-sources/:id", async (req, res) => {
       doc.enrich = { collection, localField, foreignField, sumFields };
     }
     enrichChanged = true;
+  }
+
+  // The activity link is what makes campaign impact measurable — a sibling
+  // collection with one timestamped row per thing a lead did. Unlike enrich
+  // it adds no filterable fields, so it deliberately doesn't touch
+  // fieldsCache; it's read per-query by lib/leadActivity.js instead.
+  if (activity !== undefined) {
+    if (activity === null) {
+      doc.activity = undefined;
+    } else {
+      const {
+        collection,
+        localField,
+        foreignField,
+        timestampField,
+        correctField,
+        labelFields,
+        noun,
+        answerField,
+        correctAnswerField,
+        questions,
+      } = activity;
+      if (!collection || !localField || !foreignField || !timestampField) {
+        return res.status(400).json({
+          error: "activity requires collection, localField, foreignField and timestampField",
+        });
+      }
+      // The question link is optional, but a half-specified one would show
+      // blank questions rather than fail visibly — so reject it outright.
+      if (questions) {
+        const { collection: qc, activityKeyField, keyField, textField } = questions;
+        if (!qc || !activityKeyField || !keyField || !textField) {
+          return res.status(400).json({
+            error: "activity.questions requires collection, activityKeyField, keyField and textField",
+          });
+        }
+      }
+      doc.activity = {
+        collection,
+        localField,
+        foreignField,
+        timestampField,
+        correctField: correctField || undefined,
+        labelFields: Array.isArray(labelFields) ? labelFields : [],
+        noun: noun || "activity",
+        answerField: answerField || undefined,
+        correctAnswerField: correctAnswerField || undefined,
+        questions: questions || undefined,
+      };
+    }
   }
 
   try {

@@ -213,9 +213,17 @@ const firstString = (...candidates) => {
   return found ? String(found) : undefined;
 };
 
+// Both camelCase and snake_case spellings are checked because WATI's send
+// response is snake_case (`local_message_id`, alongside `phone_number` and
+// `template_name`) while its webhook payloads are camelCase. Reading only the
+// camelCase spelling meant the id sitting in the send response was silently
+// dropped, leaving every send dependent on the *MessageSent webhook arriving
+// — and any send made while the webhook receiver was down was permanently
+// unmatchable, since nothing was stored to match it against later.
 function extractSentMessageId(result) {
   return firstString(
     result?.whatsappMessageId,
+    result?.whatsapp_message_id,
     result?.message?.whatsappMessageId,
     result?.messageId,
     result?.id,
@@ -224,7 +232,12 @@ function extractSentMessageId(result) {
 }
 
 function extractSentLocalMessageId(result) {
-  return firstString(result?.localMessageId, result?.message?.localMessageId);
+  return firstString(
+    result?.localMessageId,
+    result?.local_message_id,
+    result?.message?.localMessageId,
+    result?.message?.local_message_id
+  );
 }
 
 // Send the current step's message for one enrollment, then advance it to the
@@ -362,4 +375,14 @@ function startScheduler() {
   console.log(`[campaignEngine] polling every ${POLL_INTERVAL_MS}ms for due drip messages (when a provider is connected)`);
 }
 
-module.exports = { enrollTargets, previewTargets, sendSingleMessage, processDueEnrollments, startScheduler };
+// getAdapter is exported for the read side: showing a lead's details means
+// loading the target document from whichever source the campaign points at,
+// which is exactly what the adapters already abstract.
+module.exports = {
+  enrollTargets,
+  previewTargets,
+  sendSingleMessage,
+  processDueEnrollments,
+  startScheduler,
+  getAdapter,
+};

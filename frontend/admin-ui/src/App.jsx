@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import ZohoTab from "./ZohoTab";
 import CampaignsTab from "./CampaignsTab";
-import SingleSendsTab from "./SingleSendsTab";
+import MessageTrackingTab from "./MessageTrackingTab";
 import IntegrationsTab from "./IntegrationsTab";
 import DataSourcesTab from "./DataSourcesTab";
 import LeadMagnetDataTab from "./LeadMagnetDataTab";
@@ -56,10 +56,10 @@ export default function App() {
         </button>
         <button
           type="button"
-          className={`tab ${tab === "single-sends" ? "active" : ""}`}
-          onClick={() => setTab("single-sends")}
+          className={`tab ${tab === "message-tracking" ? "active" : ""}`}
+          onClick={() => setTab("message-tracking")}
         >
-          Single Sends
+          Message Tracking
         </button>
         <button type="button" className={`tab ${tab === "data-sources" ? "active" : ""}`} onClick={() => setTab("data-sources")}>
           Data Sources
@@ -76,7 +76,7 @@ export default function App() {
           )
       )}
       {tab === "campaigns" && <CampaignsTab focusCampaignId={campaignFocusId} />}
-      {tab === "single-sends" && <SingleSendsTab />}
+      {tab === "message-tracking" && <MessageTrackingTab />}
       {tab === "data-sources" && <DataSourcesTab onChanged={reloadDataSources} />}
       {tab === "integrations" && <IntegrationsTab />}
     </div>

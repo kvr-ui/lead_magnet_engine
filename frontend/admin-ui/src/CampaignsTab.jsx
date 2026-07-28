@@ -3,6 +3,7 @@ import {
   fetchCampaigns,
   createCampaign,
   updateCampaign,
+  deleteCampaign,
   fetchSegmentMembers,
   fetchTemplates,
   fetchChannels,
@@ -11,11 +12,13 @@ import {
   fetchEnrollments,
   fetchDataSources,
   fetchDataSourceFields,
+  fetchActivitySummary,
 } from "./api";
 import LeadsTable from "./LeadsTable";
 import Pager from "./Pager";
 import FilterCondition, { buildMongoFilter } from "./FilterBuilder";
 import { DeliveryFunnel, DeliveryCell, EnrollmentTimeline } from "./MessageDelivery";
+import CampaignActivity from "./LeadActivity";
 
 const DYNAMIC_PREFIX = "datasource:";
 
@@ -376,6 +379,11 @@ function CampaignDetail({ campaign, sourceLabels, onClose, onChanged }) {
       <h4>Delivery</h4>
       <DeliveryFunnel campaignId={campaign._id} refreshKey={enrollResult} />
 
+      {/* Delivery stops at the handset. This is the question after it: once
+          the message landed, did the lead actually go and use the product. */}
+      <h4>Activity after this campaign</h4>
+      <CampaignActivity campaignId={campaign._id} refreshKey={enrollResult} />
+
       <h4>Enrollments</h4>
       <select value={statusFilter} onChange={(e) => { setStatusFilter(e.target.value); setPage(1); }}>
         <option value="">All statuses</option>
@@ -410,11 +418,49 @@ export default function CampaignsTab({ focusCampaignId = null }) {
   // tab's "Move to campaign", rather than on the campaign list.
   const [selectedId, setSelectedId] = useState(focusCampaignId);
   const [dataSources, setDataSources] = useState([]);
+  const [deletingId, setDeletingId] = useState(null);
+  // Per-campaign activation rollup, read from the lead magnet's own database.
+  // Its own request rather than part of /api/campaigns: it crosses to a
+  // separate database, so a slow or unreachable lead magnet shouldn't hold up
+  // the campaign list itself.
+  const [activity, setActivity] = useState(null);
 
   function reload() {
     fetchCampaigns()
       .then(setCampaigns)
       .catch((err) => setError(err.message));
+    fetchActivitySummary()
+      .then(setActivity)
+      .catch(() => setActivity(null));
+  }
+
+  async function handleDelete(campaign) {
+    // Spell out the enrollments going with it. The count is the whole reason
+    // to hesitate — deleting a campaign mid-drip stops every lead in it.
+    const counts = campaign.enrollments || {};
+    const enrolled = Object.values(counts).reduce((n, v) => n + v, 0);
+    const breakdown = Object.entries(counts)
+      .filter(([, n]) => n)
+      .map(([status, n]) => `${n} ${status}`)
+      .join(", ");
+
+    const warning = enrolled
+      ? `Delete "${campaign.name}"? This also deletes its ${enrolled} enrollments (${breakdown}) — any lead still mid-drip stops receiving messages. Delivery history already recorded is kept. This cannot be undone.`
+      : `Delete "${campaign.name}"? This cannot be undone.`;
+    if (!window.confirm(warning)) return;
+
+    setError(null);
+    setDeletingId(campaign._id);
+    try {
+      await deleteCampaign(campaign._id);
+      // The detail view would be showing a campaign that no longer exists.
+      if (selectedId === campaign._id) setSelectedId(null);
+      reload();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setDeletingId(null);
+    }
   }
 
   useEffect(reload, []);
@@ -477,6 +523,12 @@ export default function CampaignsTab({ focusCampaignId = null }) {
                   <th>Read</th>
                   <th>Replied</th>
                   <th>Undelivered</th>
+                  {/* Past delivery entirely: what leads did in the product
+                      after being messaged. Each activated lead is credited to
+                      one campaign only, so these columns don't double-count. */}
+                  {activity?.configured && <th>Activated</th>}
+                  {activity?.configured && <th>{activity.source?.noun || "Activity"} solved</th>}
+                  <th />
                 </tr>
               </thead>
               <tbody>
@@ -504,6 +556,31 @@ export default function CampaignsTab({ focusCampaignId = null }) {
                       ) : (
                         0
                       )}
+                    </td>
+                    {activity?.configured && (
+                      <td>
+                        {activity.campaigns[c._id]?.activated ? (
+                          <span className="badge badge-success">{activity.campaigns[c._id].activated}</span>
+                        ) : (
+                          0
+                        )}
+                      </td>
+                    )}
+                    {activity?.configured && <td>{activity.campaigns[c._id]?.count || 0}</td>}
+                    <td>
+                      {/* The row opens the campaign, so the click must stop
+                          here or deleting would also navigate into it. */}
+                      <button
+                        type="button"
+                        className="link-btn danger"
+                        disabled={deletingId === c._id}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDelete(c);
+                        }}
+                      >
+                        {deletingId === c._id ? "Deleting…" : "Delete"}
+                      </button>
                     </td>
                   </tr>
                 ))}

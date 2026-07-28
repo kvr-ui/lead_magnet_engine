@@ -80,6 +80,12 @@ export function updateCampaign(id, body) {
   return sendJSON("PATCH", `/api/campaigns/${id}`, body);
 }
 
+// Removes the campaign and its enrollments. The delivery events already
+// recorded for it are kept.
+export function deleteCampaign(id) {
+  return sendJSON("DELETE", `/api/campaigns/${id}`);
+}
+
 export function fetchFilterFields(source) {
   return getJSON(`/api/campaigns/meta/fields?source=${encodeURIComponent(source)}`);
 }
@@ -116,17 +122,57 @@ export function fetchEnrollmentEvents(enrollmentId) {
   return getJSON(`/api/enrollments/${enrollmentId}/events`);
 }
 
-// Manual single-number sends. Separate from campaign delivery because they
-// have no campaign to belong to — but tracked the same way, so the same
-// timeline renders for both.
-export function fetchDirectMessages({ page = 1, phone = "" } = {}) {
-  const params = new URLSearchParams({ page });
-  if (phone) params.set("phone", phone);
-  return getJSON(`/api/direct-messages?${params.toString()}`);
+// Everything behind one send: the lead record, the campaign, and the events.
+export function fetchEnrollmentDetail(enrollmentId) {
+  return getJSON(`/api/enrollments/${enrollmentId}`);
 }
 
-export function fetchDirectMessageEvents(id) {
-  return getJSON(`/api/direct-messages/${id}/events`);
+export function fetchDirectMessageDetail(id) {
+  return getJSON(`/api/direct-messages/${id}`);
+}
+
+// Every send, campaign and manual alike, in one feed. kind narrows it to one
+// or the other; phone is a substring match.
+export function fetchSends({ page = 1, phone = "", kind = "" } = {}) {
+  const params = new URLSearchParams({ page });
+  if (phone) params.set("phone", phone);
+  if (kind) params.set("kind", kind);
+  return getJSON(`/api/sends?${params.toString()}`);
+}
+
+// --- Lead activity (what leads did after we messaged them) ---------------
+// The step past delivery: delivery says the message landed, this says whether
+// the lead then went and used the product. Read live from the lead magnet's
+// own database — see backend lib/leadActivity.js.
+
+export function fetchCampaignActivity(id, windowHours) {
+  const params = new URLSearchParams();
+  if (windowHours !== undefined && windowHours !== "") params.set("windowHours", windowHours);
+  const qs = params.toString();
+  return getJSON(`/api/campaigns/${id}/activity${qs ? `?${qs}` : ""}`);
+}
+
+// Every question one lead answered after this campaign messaged them — the
+// wording, what they picked, what was right. Scoped to the same window as the
+// row it expands, so the questions listed match the count shown.
+export function fetchCampaignLeadActivity(id, leadKey, windowHours) {
+  const params = new URLSearchParams();
+  if (windowHours !== undefined && windowHours !== "") params.set("windowHours", windowHours);
+  const qs = params.toString();
+  return getJSON(`/api/campaigns/${id}/activity/${encodeURIComponent(leadKey)}${qs ? `?${qs}` : ""}`);
+}
+
+// Per-campaign rollup for the campaign list, each activated lead credited to
+// exactly one campaign so the columns don't overlap.
+export function fetchActivitySummary(windowHours) {
+  const params = new URLSearchParams();
+  if (windowHours !== undefined && windowHours !== "") params.set("windowHours", windowHours);
+  const qs = params.toString();
+  return getJSON(`/api/activity/summary${qs ? `?${qs}` : ""}`);
+}
+
+export function fetchActivitySource() {
+  return getJSON("/api/activity/source");
 }
 
 export function fetchMessageEvents({ page = 1, status = "", phone = "", campaign = "", linked = "" } = {}) {

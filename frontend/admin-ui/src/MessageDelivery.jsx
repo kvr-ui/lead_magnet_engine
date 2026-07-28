@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { fetchCampaignDelivery, fetchDirectMessageEvents, fetchEnrollmentEvents } from "./api";
+import { fetchCampaignDelivery, fetchEnrollmentEvents } from "./api";
 
 // Presentation of the delivery state reported back by the WATI webhook.
 //
@@ -154,25 +154,31 @@ function EventTimeline({ id, fetcher, heading, subheading, onClose }) {
         </p>
       )}
 
-      {events && Boolean(events.length) && (
-        <ol className="timeline">
-          {events.map((e) => (
-            <li key={e._id}>
-              <StatusBadge status={e.status} />{" "}
-              <span className="muted">{new Date(e.receivedAt).toLocaleString()}</span>
-              <span className="muted"> · {e.eventType}</span>
-              {e.text && <div className="timeline-text">{e.text}</div>}
-              {e.failedCode && (
-                <div className="error">
-                  Meta error {e.failedCode}
-                  {e.failedDetail ? `: ${e.failedDetail}` : ""}
-                </div>
-              )}
-            </li>
-          ))}
-        </ol>
-      )}
+      {events && Boolean(events.length) && <EventList events={events} />}
     </div>
+  );
+}
+
+// The events themselves, oldest first. Presentational only — used both by the
+// self-fetching timeline above and by detail panels that already hold the
+// events.
+export function EventList({ events }) {
+  return (
+    <ol className="timeline">
+      {events.map((e) => (
+        <li key={e._id}>
+          <StatusBadge status={e.status} /> <span className="muted">{new Date(e.receivedAt).toLocaleString()}</span>
+          <span className="muted"> · {e.eventType}</span>
+          {e.text && <div className="timeline-text">{e.text}</div>}
+          {e.failedCode && (
+            <div className="error">
+              Meta error {e.failedCode}
+              {e.failedDetail ? `: ${e.failedDetail}` : ""}
+            </div>
+          )}
+        </li>
+      ))}
+    </ol>
   );
 }
 
@@ -188,17 +194,3 @@ export function EnrollmentTimeline({ enrollment, onClose }) {
   );
 }
 
-// The same trail for a hand-sent message. Headed by the template rather than
-// "message history": a single send is one message, so naming which one is more
-// use than restating that it's a history.
-export function DirectMessageTimeline({ message, onClose }) {
-  return (
-    <EventTimeline
-      id={message._id}
-      fetcher={fetchDirectMessageEvents}
-      heading={message.phone}
-      subheading={`— ${message.templateId}`}
-      onClose={onClose}
-    />
-  );
-}

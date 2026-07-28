@@ -1,8 +1,10 @@
 const { Types } = require("mongoose");
 const MessageEvent = require("../models/MessageEvent");
+const Campaign = require("../models/Campaign");
 const CampaignEnrollment = require("../models/CampaignEnrollment");
 const DirectMessage = require("../models/DirectMessage");
 const { asyncRouter } = require("../lib/asyncRouter");
+const { getAdapter } = require("../lib/campaignEngine");
 
 const router = asyncRouter();
 
@@ -84,6 +86,75 @@ router.get("/campaigns/:id/delivery", async (req, res) => {
   });
 });
 
+// A target document is whatever the connected source happens to hold, and a
+// `users` collection can carry password hashes, reset tokens and API keys.
+// None of that belongs on a delivery screen, so anything that looks like a
+// credential is dropped rather than trusting every source to be free of them.
+const SENSITIVE_FIELD = /pass|hash|salt|token|secret|otp|api[-_]?key|credential|auth/i;
+
+function safeFields(doc) {
+  if (!doc) return null;
+  // Serialising first turns ObjectIds and Dates into strings, so the UI gets
+  // values it can render instead of driver objects.
+  const plain = JSON.parse(JSON.stringify(doc));
+  const out = {};
+  for (const [key, value] of Object.entries(plain)) {
+    if (key === "__v" || SENSITIVE_FIELD.test(key)) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
+// GET /api/enrollments/:id — everything known about one lead's place in a
+// campaign: the enrollment, the campaign it belongs to, the lead record it
+// targets, and every event recorded against it.
+router.get("/enrollments/:id", async (req, res) => {
+  const id = asObjectId(req.params.id);
+  if (!id) return res.status(400).json({ error: "Invalid enrollment id" });
+
+  const enrollment = await CampaignEnrollment.findById(id).lean();
+  if (!enrollment) return res.status(404).json({ error: "Enrollment not found" });
+
+  const [campaign, events] = await Promise.all([
+    Campaign.findById(enrollment.campaign).select("name targetModel steps channelId active").lean(),
+    MessageEvent.find({ enrollment: id }).sort({ receivedAt: 1 }).select("-payload").lean(),
+  ]);
+
+  // The lead itself lives in whichever collection the campaign targets, so it
+  // loads through the same adapter the engine sends through. A source that has
+  // since been disconnected or deleted must not take the whole panel down —
+  // report why the lead is missing and show everything else.
+  let lead = null;
+  let leadError = null;
+  try {
+    const adapter = await getAdapter(enrollment.targetModel);
+    lead = safeFields(await adapter.findById(enrollment.targetId));
+    if (!lead) leadError = "This lead no longer exists in the source collection";
+  } catch (err) {
+    leadError = err.message;
+  }
+
+  res.json({ enrollment, campaign, lead, leadError, events });
+});
+
+// GET /api/direct-messages/:id — the same detail for a hand-sent message.
+// There is no lead record behind it: a manual send is addressed to a number,
+// not to a row in a source collection.
+router.get("/direct-messages/:id", async (req, res) => {
+  const id = asObjectId(req.params.id);
+  if (!id) return res.status(400).json({ error: "Invalid message id" });
+
+  const message = await DirectMessage.findById(id).lean();
+  if (!message) return res.status(404).json({ error: "Message not found" });
+
+  const events = await MessageEvent.find({ directMessage: id })
+    .sort({ receivedAt: 1 })
+    .select("-payload")
+    .lean();
+
+  res.json({ message, events });
+});
+
 // GET /api/enrollments/:id/events — full event timeline for one lead, oldest
 // first so it reads as a story.
 router.get("/enrollments/:id/events", async (req, res) => {
@@ -96,6 +167,141 @@ router.get("/enrollments/:id/events", async (req, res) => {
     .lean();
 
   res.json({ count: events.length, events });
+});
+
+// Group events into { <key>: { sent: n, delivered: n, ... } } by one field.
+async function groupByField(match, field) {
+  const out = new Map();
+  const rows = await MessageEvent.aggregate([
+    { $match: match },
+    { $group: { _id: { key: `$${field}`, status: "$status" }, events: { $sum: 1 } } },
+  ]);
+  for (const row of rows) {
+    const key = String(row._id.key);
+    if (!out.has(key)) out.set(key, {});
+    out.get(key)[row._id.status] = row.events;
+  }
+  return out;
+}
+
+// GET /api/sends — every message we have sent, campaign and manual alike,
+// newest first.
+//
+// Sends live in two shapes: a step in a CampaignEnrollment's history, and a
+// DirectMessage. $unionWith merges them so the sort and the paging happen in
+// the database across the combined set — paging each collection separately and
+// merging in JS would produce pages that are only locally ordered.
+router.get("/sends", async (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit, 10) || 50, 500);
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const kind = req.query.kind === "campaign" || req.query.kind === "manual" ? req.query.kind : null;
+
+  // Filtering before the $unwind/$project keeps it on an indexed field.
+  const phoneMatch = req.query.phone ? [{ $match: { phone: new RegExp(escapeRegex(req.query.phone)) } }] : [];
+
+  // One row per step actually sent. Steps a lead hasn't reached yet aren't
+  // sends and have no history entry, so they correctly never appear.
+  const campaignBranch = [
+    ...phoneMatch,
+    { $unwind: "$history" },
+    {
+      $project: {
+        _id: 0,
+        kind: "campaign",
+        enrollmentId: "$_id",
+        campaignId: "$campaign",
+        stepIndex: "$history.stepIndex",
+        phone: "$phone",
+        templateId: "$history.templateId",
+        sentAt: "$history.sentAt",
+        status: "$history.status",
+        error: "$history.error",
+        providerMessageId: "$history.providerMessageId",
+      },
+    },
+  ];
+
+  const manualBranch = [
+    ...phoneMatch,
+    {
+      $project: {
+        _id: 0,
+        kind: "manual",
+        directMessageId: "$_id",
+        phone: "$phone",
+        templateId: "$templateId",
+        sentAt: "$sentAt",
+        status: "$status",
+        error: "$error",
+        providerMessageId: "$providerMessageId",
+      },
+    },
+  ];
+
+  const base = kind === "manual" ? DirectMessage : CampaignEnrollment;
+  const stages =
+    kind === "manual"
+      ? manualBranch
+      : kind === "campaign"
+        ? campaignBranch
+        : [...campaignBranch, { $unionWith: { coll: "directmessages", pipeline: manualBranch } }];
+
+  const [result] = await base.aggregate([
+    ...stages,
+    { $sort: { sentAt: -1 } },
+    {
+      $facet: {
+        rows: [{ $skip: (page - 1) * limit }, { $limit: limit }],
+        total: [{ $count: "n" }],
+      },
+    },
+  ]);
+
+  const rows = result?.rows || [];
+  const total = result?.total?.[0]?.n || 0;
+
+  // Delivery, as precisely as each row allows.
+  //
+  // A row that knows its own provider message id gets the events for THAT
+  // message and nothing else. Rows without one — sends made before ids were
+  // recorded — fall back to their enrollment or direct-message link. That
+  // fallback is exact for a single-step enrollment and a summary across steps
+  // for a multi-step one, which is the best that can be said when the send
+  // never recorded which message it was.
+  const wamids = [...new Set(rows.filter((r) => r.providerMessageId).map((r) => r.providerMessageId))];
+  const enrollmentIds = rows.filter((r) => !r.providerMessageId && r.enrollmentId).map((r) => r.enrollmentId);
+  const directIds = rows.filter((r) => !r.providerMessageId && r.directMessageId).map((r) => r.directMessageId);
+
+  const [byWamid, byEnrollment, byDirect, campaigns] = await Promise.all([
+    wamids.length ? groupByField({ providerMessageId: { $in: wamids } }, "providerMessageId") : new Map(),
+    enrollmentIds.length ? groupByField({ enrollment: { $in: enrollmentIds } }, "enrollment") : new Map(),
+    directIds.length ? groupByField({ directMessage: { $in: directIds } }, "directMessage") : new Map(),
+    Campaign.find({ _id: { $in: rows.filter((r) => r.campaignId).map((r) => r.campaignId) } })
+      .select("name")
+      .lean(),
+  ]);
+
+  const campaignName = new Map(campaigns.map((c) => [String(c._id), c.name]));
+
+  res.json({
+    total,
+    count: rows.length,
+    page,
+    pageSize: limit,
+    funnelOrder: FUNNEL_ORDER,
+    sends: rows.map((r) => ({
+      ...r,
+      // The table keys on _id; a campaign send is identified by which step of
+      // which enrollment it was, since one enrollment holds several sends.
+      _id: r.kind === "campaign" ? `${r.enrollmentId}-${r.stepIndex}` : String(r.directMessageId),
+      campaignName: r.campaignId ? campaignName.get(String(r.campaignId)) || null : null,
+      delivery: r.providerMessageId
+        ? byWamid.get(r.providerMessageId) || {}
+        : r.enrollmentId
+          ? byEnrollment.get(String(r.enrollmentId)) || {}
+          : byDirect.get(String(r.directMessageId)) || {},
+    })),
+  });
 });
 
 // GET /api/direct-messages — manual single-number sends, newest first, each

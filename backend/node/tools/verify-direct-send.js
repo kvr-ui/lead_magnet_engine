@@ -167,6 +167,71 @@ const check = (name, pass, detail) => {
   const orphans = await (await fetch(`${BASE}/api/message-events?linked=no&phone=${PHONE}`)).json();
   check("a tracked manual send no longer counts as unattributed", orphans.total === 0, `${orphans.total} orphaned`);
 
+  // --- the unified feed of every send ----------------------------------
+  const feed = await (await fetch(`${BASE}/api/sends?phone=${PHONE}`)).json();
+  check("unified feed lists the manual send", feed.sends?.[0]?.kind === "manual", `got ${feed.sends?.[0]?.kind}`);
+  check(
+    "manual row carries delivery for its own message id",
+    feed.sends?.[0]?.delivery?.read === 1 && feed.sends?.[0]?.delivery?.delivered === 1,
+    JSON.stringify(feed.sends?.[0]?.delivery || {})
+  );
+
+  const campaignOnly = await (await fetch(`${BASE}/api/sends?phone=${PHONE2}&kind=campaign`)).json();
+  const campaignRow = campaignOnly.sends?.[0];
+  check("kind=campaign returns only campaign sends", campaignOnly.sends?.every((s) => s.kind === "campaign"), "");
+  check(
+    "campaign row names its campaign and step",
+    campaignRow?.campaignName === "__verify_direct__" && campaignRow?.stepIndex === 0,
+    `${campaignRow?.campaignName} step ${campaignRow?.stepIndex}`
+  );
+  check(
+    "campaign row carries delivery for its own message id",
+    campaignRow?.delivery?.delivered === 1,
+    JSON.stringify(campaignRow?.delivery || {})
+  );
+
+  const merged = await (await fetch(`${BASE}/api/sends?phone=${PHONE2}`)).json();
+  check(
+    "unfiltered feed merges both kinds for one number",
+    new Set((merged.sends || []).map((s) => s.kind)).size === 2,
+    (merged.sends || []).map((s) => s.kind).join(",")
+  );
+  check(
+    "feed is sorted newest first across both collections",
+    (merged.sends || []).every((s, i, all) => i === 0 || new Date(all[i - 1].sentAt) >= new Date(s.sentAt)),
+    ""
+  );
+
+  // --- the detail panel behind a clicked row ---------------------------
+  const manualDetail = await (await fetch(`${BASE}/api/direct-messages/${direct.insertedId}`)).json();
+  check(
+    "manual detail returns the message and its events",
+    manualDetail.message?.templateId === "verify_direct_tpl" && manualDetail.events?.length === rows.length,
+    `${manualDetail.events?.length} events`
+  );
+  check(
+    "manual detail carries the backfilled message ids",
+    manualDetail.message?.providerMessageId === W1 && manualDetail.message?.providerLocalMessageId === L1,
+    ""
+  );
+
+  const campaignDetail = await (await fetch(`${BASE}/api/enrollments/${enrollment.insertedId}`)).json();
+  check(
+    "campaign detail returns the enrollment and its campaign",
+    campaignDetail.enrollment?.status === "completed" && campaignDetail.campaign?.name === "__verify_direct__",
+    `${campaignDetail.campaign?.name}`
+  );
+  check(
+    "campaign detail reports a missing lead instead of failing",
+    campaignDetail.lead === null && Boolean(campaignDetail.leadError),
+    campaignDetail.leadError || "(no error given)"
+  );
+  check(
+    "detail 404s on an id that does not exist",
+    (await fetch(`${BASE}/api/enrollments/${new m.Types.ObjectId()}`)).status === 404,
+    ""
+  );
+
   await wipe();
 
   const failed = results.filter((r) => !r.pass);
