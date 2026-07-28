@@ -481,11 +481,13 @@ function CampaignDetail({ campaign, sourceLabels, onClose, onChanged }) {
 
 // --- Top-level tab --------------------------------------------------------
 
-export default function CampaignsTab() {
+export default function CampaignsTab({ focusCampaignId = null }) {
   const [campaigns, setCampaigns] = useState([]);
   const [error, setError] = useState(null);
   const [showCreate, setShowCreate] = useState(false);
-  const [selectedId, setSelectedId] = useState(null);
+  // Opens straight on one campaign when the tab was entered from a leads
+  // tab's "Move to campaign", rather than on the campaign list.
+  const [selectedId, setSelectedId] = useState(focusCampaignId);
   const [dataSources, setDataSources] = useState([]);
 
   function reload() {

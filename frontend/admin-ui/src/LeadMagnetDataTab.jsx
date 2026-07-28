@@ -3,6 +3,7 @@ import { fetchDataSourceFields, fetchDataSourceDocuments } from "./api";
 import FieldPicker from "./FieldPicker";
 import FilterCondition, { buildMongoFilter } from "./FilterBuilder";
 import LeadsTable from "./LeadsTable";
+import MoveToCampaign from "./MoveToCampaign";
 import Pager from "./Pager";
 
 function humanize(key) {
@@ -24,7 +25,7 @@ function loadVisible(storageKey, defaultVisible) {
 // original CaGuruTab/ZohoTab): given a DataSourceConnection id, this
 // discovers its fields, and renders the same field-picker + filter +
 // paginated table pattern for any connected external collection.
-export default function LeadMagnetDataTab({ dataSourceId, label }) {
+export default function LeadMagnetDataTab({ dataSourceId, label, onOpenCampaigns }) {
   const storageKey = `leads:columns:datasource:${dataSourceId}`;
   const source = `datasource:${dataSourceId}`;
 
@@ -94,9 +95,18 @@ export default function LeadMagnetDataTab({ dataSourceId, label }) {
           onRemove={() => setConditions(conditions.filter((_, idx) => idx !== i))}
         />
       ))}
-      <button type="button" className="link-btn" onClick={() => setConditions([...conditions, { field: "", values: [] }])}>
-        + add condition
-      </button>
+      <div className="filter-actions">
+        <button type="button" className="link-btn" onClick={() => setConditions([...conditions, { field: "", values: [] }])}>
+          + add condition
+        </button>
+        <MoveToCampaign
+          source={source}
+          filter={filter}
+          filterKey={filterKey}
+          matchCount={data.total}
+          onOpenCampaigns={onOpenCampaigns}
+        />
+      </div>
 
       <FieldPicker allFields={allColumns.map(({ key, header }) => ({ key, label: header }))} visible={visible} onChange={updateVisible} />
       <Pager page={data.page || page} totalPages={data.totalPages} total={data.total} onChange={setPage} />

@@ -103,9 +103,12 @@ export function fetchEnrollments(id, status = "", page = 1) {
   return getJSON(`/api/campaigns/${id}/enrollments?${params.toString()}`);
 }
 
+// Sent as a POST body rather than a query string: a filter is unbounded in
+// size (an $in over a few hundred picked values is easily tens of KB) and
+// as a URL it blew past the server's header limit, failing with
+// "431 Request Header Fields Too Large" before the request was ever handled.
 export function fetchSegmentMembers(source, filter, page = 1) {
-  const params = new URLSearchParams({ source, page, filter: JSON.stringify(filter || {}) });
-  return getJSON(`/api/campaigns/meta/members?${params.toString()}`);
+  return sendJSON("POST", "/api/campaigns/meta/members", { source, page, filter: filter || {} });
 }
 
 export function fetchTemplates() {
@@ -158,9 +161,20 @@ export function fetchRelatedCollectionFields(id, collectionName) {
   return getJSON(`/api/data-sources/${id}/related-collections/${encodeURIComponent(collectionName)}/fields`);
 }
 
+// POST for the same reason as fetchSegmentMembers — the filter goes in the
+// body so its size is never bounded by the HTTP header limit.
 export function fetchDataSourceDocuments(id, page, filter) {
-  const params = new URLSearchParams({ page, filter: JSON.stringify(filter || {}) });
-  return getJSON(`/api/data-sources/${id}/documents?${params.toString()}`);
+  return sendJSON("POST", `/api/data-sources/${id}/documents`, { page, filter: filter || {} });
+}
+
+// --- Global sending kill switch ----------------------------------------
+
+export function fetchSendingEnabled() {
+  return getJSON("/api/settings/sending");
+}
+
+export function setSendingEnabled(enabled) {
+  return sendJSON("POST", "/api/settings/sending", { enabled });
 }
 
 // --- WhatsApp provider integration -------------------------------------

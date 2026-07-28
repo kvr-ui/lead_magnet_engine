@@ -4,11 +4,15 @@ import CampaignsTab from "./CampaignsTab";
 import IntegrationsTab from "./IntegrationsTab";
 import DataSourcesTab from "./DataSourcesTab";
 import LeadMagnetDataTab from "./LeadMagnetDataTab";
+import SendingToggle from "./SendingToggle";
 import { fetchDataSources } from "./api";
 
 export default function App() {
   const [tab, setTab] = useState("zoho");
   const [dataSources, setDataSources] = useState([]);
+  // Set when arriving from "Move to campaign" on a leads tab, so the campaign
+  // the leads landed in opens directly instead of the campaign list.
+  const [campaignFocusId, setCampaignFocusId] = useState(null);
 
   function reloadDataSources() {
     fetchDataSources()
@@ -18,11 +22,19 @@ export default function App() {
 
   useEffect(reloadDataSources, []);
 
+  function openCampaigns(campaignId = null) {
+    setCampaignFocusId(campaignId);
+    setTab("campaigns");
+  }
+
   return (
     <div className="page">
       <div className="app-header">
         <h1>Leads</h1>
-        <span className="muted">Contacts, campaigns &amp; integrations</span>
+        <div className="app-header-right">
+          <span className="muted">Contacts, campaigns &amp; integrations</span>
+          <SendingToggle />
+        </div>
       </div>
       <div className="tabs">
         <button type="button" className={`tab ${tab === "zoho" ? "active" : ""}`} onClick={() => setTab("zoho")}>
@@ -38,7 +50,7 @@ export default function App() {
             {ds.label}
           </button>
         ))}
-        <button type="button" className={`tab ${tab === "campaigns" ? "active" : ""}`} onClick={() => setTab("campaigns")}>
+        <button type="button" className={`tab ${tab === "campaigns" ? "active" : ""}`} onClick={() => openCampaigns()}>
           Campaigns
         </button>
         <button type="button" className={`tab ${tab === "data-sources" ? "active" : ""}`} onClick={() => setTab("data-sources")}>
@@ -50,9 +62,12 @@ export default function App() {
       </div>
       {tab === "zoho" && <ZohoTab />}
       {dataSources.map(
-        (ds) => tab === `ds-${ds._id}` && <LeadMagnetDataTab key={ds._id} dataSourceId={ds._id} label={ds.label} />
+        (ds) =>
+          tab === `ds-${ds._id}` && (
+            <LeadMagnetDataTab key={ds._id} dataSourceId={ds._id} label={ds.label} onOpenCampaigns={openCampaigns} />
+          )
       )}
-      {tab === "campaigns" && <CampaignsTab />}
+      {tab === "campaigns" && <CampaignsTab focusCampaignId={campaignFocusId} />}
       {tab === "data-sources" && <DataSourcesTab onChanged={reloadDataSources} />}
       {tab === "integrations" && <IntegrationsTab />}
     </div>

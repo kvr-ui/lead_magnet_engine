@@ -91,10 +91,84 @@ body {
 
 .app-header {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 1rem;
   margin-bottom: 1.5rem;
+}
+
+.app-header-right {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.sending-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* Off is the safe state, so it's the quiet one; on is styled loud, because
+   "messages are going out for real" is what deserves a second look. */
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.35rem 0.8rem 0.35rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-surface-2);
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background var(--ease), border-color var(--ease), color var(--ease);
+}
+
+.switch:hover:not(:disabled) {
+  border-color: var(--accent-border);
+}
+
+.switch:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.switch.on {
+  background: var(--success-soft);
+  border-color: rgba(52, 211, 153, 0.45);
+  color: var(--success);
+}
+
+.switch-track {
+  position: relative;
+  width: 2.1rem;
+  height: 1.15rem;
+  border-radius: 999px;
+  background: var(--border);
+  transition: background var(--ease);
+}
+
+.switch.on .switch-track {
+  background: var(--success);
+}
+
+.switch-thumb {
+  position: absolute;
+  top: 0.15rem;
+  left: 0.15rem;
+  width: 0.85rem;
+  height: 0.85rem;
+  border-radius: 50%;
+  background: var(--text-primary);
+  transition: transform var(--ease);
+}
+
+.switch.on .switch-thumb {
+  transform: translateX(0.95rem);
+  background: #04140d;
 }
 
 .app-header h1 {
@@ -584,6 +658,26 @@ select:focus-visible {
   gap: 0.4rem;
   margin: 0.6rem 0;
   width: 100%;
+}
+
+.filter-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+/* The panel the "Move to campaign" button opens belongs under the whole
+   actions row, not beside the button that toggles it — display: contents
+   lifts both into that flex row so the panel can span its full width. */
+.move-to-campaign {
+  display: contents;
+}
+
+.move-to-campaign .enrich-editor {
+  flex: 1 1 100%;
+  max-width: 42rem;
 }
 
 .clickable-row {
