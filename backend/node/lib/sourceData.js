@@ -21,10 +21,13 @@ async function getSourceHandle(source) {
     const id = source.slice(DYNAMIC_PREFIX.length);
     const DataSourceConnection = require("../models/DataSourceConnection");
     const { getConnectionFor } = require("./dataSourcePool");
+    const { wrapWithEnrichment } = require("./enrichedCollection");
     const doc = await DataSourceConnection.findById(id);
     if (!doc || !doc.active) throw new Error("Unknown or inactive data source");
     const conn = await getConnectionFor(doc);
-    return { kind: "collection", collection: conn.db.collection(doc.collectionName) };
+    const raw = conn.db.collection(doc.collectionName);
+    const collection = doc.enrich ? wrapWithEnrichment(raw, doc.enrich) : raw;
+    return { kind: "collection", collection };
   }
   throw new Error(`Unknown source "${source}"`);
 }

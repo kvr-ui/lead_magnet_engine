@@ -6,6 +6,7 @@ const { getAdMagnetConnection } = require("../db");
 const { cleanPhone } = require("./phone");
 const whatsappProvider = require("./whatsappProvider");
 const { DYNAMIC_PREFIX } = require("./sourceFields");
+const { wrapWithEnrichment } = require("./enrichedCollection");
 
 // How many due enrollments to send per poll tick, and the gap between sends —
 // keeps us well under the connected provider's rate limits instead of firing
@@ -83,7 +84,8 @@ async function dynamicAdapter(targetModel) {
   if (!phoneField) throw new Error(`Couldn't find a phone field on data source "${doc.label}"`);
 
   const conn = await getConnectionFor(doc);
-  const collection = conn.db.collection(doc.collectionName);
+  const raw = conn.db.collection(doc.collectionName);
+  const collection = doc.enrich ? wrapWithEnrichment(raw, doc.enrich) : raw;
 
   return {
     async find(filter) {

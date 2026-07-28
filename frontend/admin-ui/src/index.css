@@ -218,6 +218,25 @@ select {
   font-size: 0.875rem;
 }
 
+.checkbox-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.4rem;
+  color: #f1f5f9;
+}
+
+.checkbox-row input {
+  width: auto;
+}
+
+.enrich-editor {
+  background: #020617;
+  border: 1px solid #1e293b;
+  border-radius: 0.375rem;
+  padding: 1rem;
+}
+
 .form-actions {
   display: flex;
   gap: 0.5rem;

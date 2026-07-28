@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { fetchFilterFields, fetchFilterValues } from "./api";
+import { formatDisplayValue } from "./formatValue";
 
 // One filter condition row: pick a field, then toggle which discovered
 // values to include (equality via $in). `source` is any value getSourceFields
@@ -60,7 +61,7 @@ export function FilterCondition({ source, condition, onChange, onRemove }) {
               className={`chip ${condition.values.includes(v.value) ? "active" : ""}`}
               onClick={() => toggleValue(v.value)}
             >
-              {String(v.value) || "(blank)"} ({v.count})
+              {String(formatDisplayValue(v.value)) || "(blank)"} ({v.count})
             </button>
           ))}
         </div>

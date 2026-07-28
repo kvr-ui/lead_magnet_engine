@@ -120,6 +120,14 @@ export function fetchDataSourceFields(id) {
   return getJSON(`/api/data-sources/${id}/fields`);
 }
 
+export function fetchRelatedCollections(id) {
+  return getJSON(`/api/data-sources/${id}/related-collections`);
+}
+
+export function fetchRelatedCollectionFields(id, collectionName) {
+  return getJSON(`/api/data-sources/${id}/related-collections/${encodeURIComponent(collectionName)}/fields`);
+}
+
 export function fetchDataSourceDocuments(id, page, filter) {
   const params = new URLSearchParams({ page, filter: JSON.stringify(filter || {}) });
   return getJSON(`/api/data-sources/${id}/documents?${params.toString()}`);

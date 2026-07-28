@@ -66,7 +66,11 @@ async function dynamicSourceFieldKeys(dataSourceId) {
   if (!doc || !doc.active) return null;
 
   const conn = await getConnectionFor(doc);
-  const keys = await sampleFieldKeys(conn.db.collection(doc.collectionName));
+  const sampled = await sampleFieldKeys(conn.db.collection(doc.collectionName));
+  // Virtual fields from an optional join (e.g. CA Guru's mcqAttempted/
+  // mcqCorrect) don't exist on the raw documents sampling above just read,
+  // so they're never discovered that way — list them explicitly instead.
+  const keys = doc.enrich ? [...new Set([...sampled, ...doc.enrich.sumFields])].sort() : sampled;
   dynamicCache.set(dataSourceId, { keys, at: Date.now() });
 
   // Best-effort refresh of the persisted cache — don't block the response on it.

@@ -23,6 +23,7 @@ function sanitize(doc) {
     fieldsCache: doc.fieldsCache,
     fieldsCachedAt: doc.fieldsCachedAt,
     lastTestedAt: doc.lastTestedAt,
+    enrich: doc.enrich,
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
   };
@@ -34,11 +35,11 @@ function maskUri(uri) {
 
 async function refreshFieldsCache(doc) {
   const conn = await getConnectionFor(doc);
-  const keys = await sampleFieldKeys(conn.db.collection(doc.collectionName));
-  doc.fieldsCache = keys;
+  const sampled = await sampleFieldKeys(conn.db.collection(doc.collectionName));
+  doc.fieldsCache = doc.enrich ? [...new Set([...sampled, ...doc.enrich.sumFields])].sort() : sampled;
   doc.fieldsCachedAt = new Date();
   await doc.save();
-  return keys;
+  return doc.fieldsCache;
 }
 
 // POST /api/data-sources/discover-databases — given just a Mongo URI (no
@@ -61,6 +62,22 @@ router.post("/data-sources/discover-databases", async (req, res) => {
 // Sentinel collectionName meaning "connect every collection in the database"
 // instead of just one — each becomes its own DataSourceConnection.
 const ALL_COLLECTIONS = "*";
+
+// Connects each named collection as its own DataSourceConnection, labeled
+// "<label> — <collection>". Used both for the "*" (all collections) sentinel
+// and for an explicit array of hand-picked collection names.
+async function connectManyCollections({ label, mongoUri, databaseName, names }) {
+  const results = [];
+  const failures = [];
+  for (const name of names) {
+    try {
+      results.push(await connectOneCollection({ label: `${label} — ${name}`, mongoUri, databaseName, collectionName: name }));
+    } catch (err) {
+      failures.push({ collectionName: name, error: err.message });
+    }
+  }
+  return { results, failures };
+}
 
 async function connectOneCollection({ label, mongoUri, databaseName, collectionName }) {
   await testConnection({ mongoUri, databaseName, collectionName });
@@ -89,14 +106,27 @@ async function connectOneCollection({ label, mongoUri, databaseName, collectionN
 // discovered and used automatically when there's exactly one. If there's
 // more than one, the request is rejected with 409 + the discovered list so
 // the UI can ask the admin to pick — we never guess which one is "the" data.
-// Pass collectionName: "*" to connect every discovered collection at once,
-// one DataSourceConnection per collection (each labeled "<label> — <collection>").
+// Pass collectionName: "*" to connect every discovered collection at once, or
+// an array of names to connect just that subset — either way each collection
+// becomes its own DataSourceConnection (labeled "<label> — <collection>").
 // Tests each connection before ever persisting its URI.
 router.post("/data-sources", async (req, res) => {
   const { label, mongoUri, databaseName } = req.body || {};
   let { collectionName } = req.body || {};
   if (!label || !mongoUri) {
     return res.status(400).json({ error: "label and mongoUri are required" });
+  }
+
+  if (Array.isArray(collectionName)) {
+    const names = [...new Set(collectionName.filter(Boolean))];
+    if (!names.length) {
+      return res.status(400).json({ error: "At least one collection must be selected" });
+    }
+    const { results, failures } = await connectManyCollections({ label, mongoUri, databaseName, names });
+    if (!results.length) {
+      return res.status(400).json({ error: "Failed to connect any collection", failures });
+    }
+    return res.status(201).json({ connections: results, failures, maskedUri: maskUri(mongoUri) });
   }
 
   if (!collectionName) {
@@ -129,15 +159,7 @@ router.post("/data-sources", async (req, res) => {
       return res.status(400).json({ error: "No collections found in that database" });
     }
 
-    const results = [];
-    const failures = [];
-    for (const name of discovered) {
-      try {
-        results.push(await connectOneCollection({ label: `${label} — ${name}`, mongoUri, databaseName, collectionName: name }));
-      } catch (err) {
-        failures.push({ collectionName: name, error: err.message });
-      }
-    }
+    const { results, failures } = await connectManyCollections({ label, mongoUri, databaseName, names: discovered });
     if (!results.length) {
       return res.status(400).json({ error: "Failed to connect any collection", failures });
     }
@@ -165,14 +187,16 @@ router.get("/data-sources/:id", async (req, res) => {
   res.json(sanitize(doc));
 });
 
-// PATCH /api/data-sources/:id — edit label/collectionName/mongoUri/active.
-// Body: { label?, mongoUri?, databaseName?, collectionName?, active? }
-// Re-tests and re-encrypts when credentials or the target collection change.
+// PATCH /api/data-sources/:id — edit label/collectionName/mongoUri/active/enrich.
+// Body: { label?, mongoUri?, databaseName?, collectionName?, active?, enrich? }
+// enrich: { collection, localField, foreignField, sumFields: [...] } to set/replace
+// the join, or null to remove it. Re-tests and re-encrypts when credentials or the
+// target collection change; either that or an enrich change refreshes fieldsCache.
 router.patch("/data-sources/:id", async (req, res) => {
   const doc = await DataSourceConnection.findById(req.params.id);
   if (!doc) return res.status(404).json({ error: "Data source not found" });
 
-  const { label, mongoUri, databaseName, collectionName, active } = req.body || {};
+  const { label, mongoUri, databaseName, collectionName, active, enrich } = req.body || {};
   const credentialsChanged =
     mongoUri !== undefined ||
     (databaseName !== undefined && databaseName !== doc.databaseName) ||
@@ -200,9 +224,25 @@ router.patch("/data-sources/:id", async (req, res) => {
   if (label !== undefined) doc.label = label;
   if (active !== undefined) doc.active = active;
 
+  let enrichChanged = false;
+  if (enrich !== undefined) {
+    if (enrich === null) {
+      doc.enrich = undefined;
+    } else {
+      const { collection, localField, foreignField, sumFields } = enrich;
+      if (!collection || !localField || !foreignField || !Array.isArray(sumFields) || !sumFields.length) {
+        return res.status(400).json({
+          error: "enrich requires collection, localField, foreignField, and at least one sumField",
+        });
+      }
+      doc.enrich = { collection, localField, foreignField, sumFields };
+    }
+    enrichChanged = true;
+  }
+
   try {
     await doc.save();
-    if (credentialsChanged) {
+    if (credentialsChanged || enrichChanged) {
       try {
         await refreshFieldsCache(doc);
       } catch (err) {
@@ -212,6 +252,41 @@ router.patch("/data-sources/:id", async (req, res) => {
     res.json(sanitize(doc));
   } catch (err) {
     res.status(400).json({ error: "Failed to update data source", detail: err.message });
+  }
+});
+
+// GET /api/data-sources/:id/related-collections — other collection names in
+// the same database as this data source, for the "enrich with a related
+// collection" picker (e.g. CA Guru's `users` -> `mcqprogresses`).
+router.get("/data-sources/:id/related-collections", async (req, res) => {
+  const doc = await DataSourceConnection.findById(req.params.id);
+  if (!doc) return res.status(404).json({ error: "Data source not found" });
+  try {
+    const conn = await getConnectionFor(doc);
+    const collections = await conn.db.listCollections().toArray();
+    res.json({
+      collections: collections
+        .map((c) => c.name)
+        .filter((name) => name !== doc.collectionName && !name.startsWith("system."))
+        .sort(),
+    });
+  } catch (err) {
+    res.status(400).json({ error: "Failed to list collections", detail: err.message });
+  }
+});
+
+// GET /api/data-sources/:id/related-collections/:name/fields — sampled field
+// names on another collection in the same database, so the enrich picker can
+// offer real field names for the join key and the fields to sum.
+router.get("/data-sources/:id/related-collections/:name/fields", async (req, res) => {
+  const doc = await DataSourceConnection.findById(req.params.id);
+  if (!doc) return res.status(404).json({ error: "Data source not found" });
+  try {
+    const conn = await getConnectionFor(doc);
+    const fields = await sampleFieldKeys(conn.db.collection(req.params.name));
+    res.json({ fields });
+  } catch (err) {
+    res.status(400).json({ error: "Failed to sample collection fields", detail: err.message });
   }
 });
 

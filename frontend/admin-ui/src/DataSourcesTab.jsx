@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import {
   fetchDataSources,
   createDataSource,
@@ -6,10 +6,157 @@ import {
   testDataSource,
   deleteDataSource,
   discoverDataSourceDatabases,
+  fetchRelatedCollections,
+  fetchRelatedCollectionFields,
 } from "./api";
 
 function emptyForm() {
   return { label: "", mongoUri: "", databaseName: "", collectionName: "" };
+}
+
+// Lets the admin join a related collection in the same database and sum
+// numeric fields across every matched row — e.g. CA Guru's per-subject MCQ
+// progress rows summed into total attempted/correct counts per student, so
+// campaigns can filter/target on them like any other field.
+function EnrichEditor({ ds, onSaved, onClose }) {
+  const [collections, setCollections] = useState(null);
+  const [collectionsError, setCollectionsError] = useState(null);
+  const [collection, setCollection] = useState(ds.enrich?.collection || "");
+  const [relatedFields, setRelatedFields] = useState([]);
+  const [localField, setLocalField] = useState(ds.enrich?.localField || "");
+  const [foreignField, setForeignField] = useState(ds.enrich?.foreignField || "");
+  const [sumFields, setSumFields] = useState(ds.enrich?.sumFields || []);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    fetchRelatedCollections(ds._id)
+      .then((d) => setCollections(d.collections))
+      .catch((err) => setCollectionsError(err.message));
+  }, [ds._id]);
+
+  useEffect(() => {
+    if (!collection) {
+      setRelatedFields([]);
+      return;
+    }
+    fetchRelatedCollectionFields(ds._id, collection)
+      .then((d) => setRelatedFields(d.fields))
+      .catch(() => setRelatedFields([]));
+  }, [ds._id, collection]);
+
+  function toggleSumField(name, checked) {
+    setSumFields((prev) => (checked ? [...prev, name] : prev.filter((n) => n !== name)));
+  }
+
+  async function handleSave() {
+    setError(null);
+    if (!collection || !localField || !foreignField || !sumFields.length) {
+      setError("Pick a collection, both join fields, and at least one field to sum.");
+      return;
+    }
+    setSaving(true);
+    try {
+      await updateDataSource(ds._id, { enrich: { collection, localField, foreignField, sumFields } });
+      onSaved();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleRemove() {
+    setSaving(true);
+    try {
+      await updateDataSource(ds._id, { enrich: null });
+      onSaved();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="enrich-editor">
+      <p className="muted">
+        Join a related collection in the same database and sum numeric fields across every matched row into new
+        fields on "{ds.label}" — usable as real filter fields for campaigns, same as any other column.
+      </p>
+      {error && <p className="error">{error}</p>}
+      {collectionsError && <p className="error">{collectionsError}</p>}
+
+      <label className="form-row">
+        Related collection
+        <select
+          value={collection}
+          onChange={(e) => {
+            setCollection(e.target.value);
+            setForeignField("");
+            setSumFields([]);
+          }}
+        >
+          <option value="">Pick a collection…</option>
+          {(collections || []).map((name) => (
+            <option key={name} value={name}>
+              {name}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <label className="form-row">
+        Join field on "{ds.collectionName}" (this data source)
+        <select value={localField} onChange={(e) => setLocalField(e.target.value)}>
+          <option value="">Pick a field…</option>
+          {(ds.fieldsCache || []).map((name) => (
+            <option key={name} value={name}>
+              {name}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <label className="form-row">
+        Matching field on "{collection || "<related collection>"}"
+        <select value={foreignField} onChange={(e) => setForeignField(e.target.value)} disabled={!collection}>
+          <option value="">Pick a field…</option>
+          {relatedFields.map((name) => (
+            <option key={name} value={name}>
+              {name}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      {collection && (
+        <div className="form-row">
+          Numeric fields to sum across every matched "{collection}" row
+          {relatedFields.map((name) => (
+            <label key={name} className="checkbox-row">
+              <input type="checkbox" checked={sumFields.includes(name)} onChange={(e) => toggleSumField(name, e.target.checked)} />
+              {name}
+            </label>
+          ))}
+        </div>
+      )}
+
+      <div className="form-actions">
+        <button type="button" onClick={handleSave} disabled={saving}>
+          {saving ? "Saving…" : "Save enrichment"}
+        </button>
+        {ds.enrich && (
+          <button type="button" className="secondary-btn" onClick={handleRemove} disabled={saving}>
+            Remove enrichment
+          </button>
+        )}
+        <button type="button" className="link-btn" onClick={onClose}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
 }
 
 export default function DataSourcesTab({ onChanged }) {
@@ -20,6 +167,7 @@ export default function DataSourcesTab({ onChanged }) {
   const [connecting, setConnecting] = useState(false);
   const [formError, setFormError] = useState(null);
   const [busyId, setBusyId] = useState(null);
+  const [enrichOpenId, setEnrichOpenId] = useState(null);
 
   // Once "Browse databases" succeeds, this holds the real database names on
   // the cluster so the admin picks from a dropdown instead of typing blind.
@@ -76,6 +224,10 @@ export default function DataSourcesTab({ onChanged }) {
   async function handleConnect(e) {
     e.preventDefault();
     setFormError(null);
+    if (ambiguousCollections && form.collectionName.length === 0) {
+      setFormError("Pick at least one collection.");
+      return;
+    }
     setConnecting(true);
     try {
       const result = await createDataSource(form);
@@ -95,13 +247,22 @@ export default function DataSourcesTab({ onChanged }) {
         // The database has more than one collection — this is the only case
         // where we ask the admin to pick; otherwise it's chosen automatically.
         setAmbiguousCollections(err.body.collections);
-        updateForm({ collectionName: "*" });
+        updateForm({ collectionName: [] });
       } else {
         setFormError(err.message);
       }
     } finally {
       setConnecting(false);
     }
+  }
+
+  function toggleCollection(name, checked) {
+    setForm((f) => ({
+      ...f,
+      collectionName: checked
+        ? [...f.collectionName, name]
+        : f.collectionName.filter((n) => n !== name),
+    }));
   }
 
   async function handleToggleActive(ds) {
@@ -169,30 +330,56 @@ export default function DataSourcesTab({ onChanged }) {
               </thead>
               <tbody>
                 {sources.map((ds) => (
-                  <tr key={ds._id}>
-                    <td>{ds.label}</td>
-                    <td>{ds.collectionName}</td>
-                    <td>
-                      {ds.status === "connected" ? (
-                        <span className="notice">connected</span>
-                      ) : (
-                        <span className="error" title={ds.lastError}>error</span>
-                      )}
-                    </td>
-                    <td>{ds.fieldsCache?.length || 0}</td>
-                    <td>{ds.active ? "yes" : "disabled"}</td>
-                    <td>
-                      <button type="button" className="link-btn" disabled={busyId === ds._id} onClick={() => handleTest(ds)}>
-                        Test
-                      </button>{" "}
-                      <button type="button" className="link-btn" disabled={busyId === ds._id} onClick={() => handleToggleActive(ds)}>
-                        {ds.active ? "Disable" : "Enable"}
-                      </button>{" "}
-                      <button type="button" className="link-btn" disabled={busyId === ds._id} onClick={() => handleDelete(ds)}>
-                        Delete
-                      </button>
-                    </td>
-                  </tr>
+                  <Fragment key={ds._id}>
+                    <tr>
+                      <td>{ds.label}</td>
+                      <td>
+                        {ds.collectionName}
+                        {ds.enrich && <div className="muted">+ {ds.enrich.collection} ({ds.enrich.sumFields.join(", ")})</div>}
+                      </td>
+                      <td>
+                        {ds.status === "connected" ? (
+                          <span className="notice">connected</span>
+                        ) : (
+                          <span className="error" title={ds.lastError}>error</span>
+                        )}
+                      </td>
+                      <td>{ds.fieldsCache?.length || 0}</td>
+                      <td>{ds.active ? "yes" : "disabled"}</td>
+                      <td>
+                        <button type="button" className="link-btn" disabled={busyId === ds._id} onClick={() => handleTest(ds)}>
+                          Test
+                        </button>{" "}
+                        <button type="button" className="link-btn" disabled={busyId === ds._id} onClick={() => handleToggleActive(ds)}>
+                          {ds.active ? "Disable" : "Enable"}
+                        </button>{" "}
+                        <button
+                          type="button"
+                          className="link-btn"
+                          onClick={() => setEnrichOpenId(enrichOpenId === ds._id ? null : ds._id)}
+                        >
+                          {enrichOpenId === ds._id ? "Close" : ds.enrich ? "Edit enrichment" : "Enrich"}
+                        </button>{" "}
+                        <button type="button" className="link-btn" disabled={busyId === ds._id} onClick={() => handleDelete(ds)}>
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                    {enrichOpenId === ds._id && (
+                      <tr>
+                        <td colSpan={6}>
+                          <EnrichEditor
+                            ds={ds}
+                            onSaved={() => {
+                              setEnrichOpenId(null);
+                              reload();
+                            }}
+                            onClose={() => setEnrichOpenId(null)}
+                          />
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 ))}
               </tbody>
             </table>
@@ -260,22 +447,32 @@ export default function DataSourcesTab({ onChanged }) {
         </label>
 
         {ambiguousCollections && (
-          <label className="form-row">
-            This database has more than one collection — which one holds the leads?
-            <select value={form.collectionName} onChange={(e) => updateForm({ collectionName: e.target.value })} required>
-              <option value="*">All collections — connect each as its own data source</option>
-              {ambiguousCollections.map((name) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
-            </select>
-            {form.collectionName === "*" && (
+          <div className="form-row">
+            This database has more than one collection — pick which ones hold leads (each becomes its own data source):
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={form.collectionName.length === ambiguousCollections.length}
+                onChange={(e) => updateForm({ collectionName: e.target.checked ? [...ambiguousCollections] : [] })}
+              />
+              Select all
+            </label>
+            {ambiguousCollections.map((name) => (
+              <label key={name} className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={form.collectionName.includes(name)}
+                  onChange={(e) => toggleCollection(name, e.target.checked)}
+                />
+                {name}
+              </label>
+            ))}
+            {form.collectionName.length > 1 && (
               <span className="muted">
                 Each will be labeled "{form.label || "<label>"} — &lt;collection&gt;".
               </span>
             )}
-          </label>
+          </div>
         )}
 
         <div className="form-actions">
