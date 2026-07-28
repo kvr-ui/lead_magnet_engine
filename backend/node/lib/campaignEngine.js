@@ -1,5 +1,6 @@
 const Campaign = require("../models/Campaign");
 const CampaignEnrollment = require("../models/CampaignEnrollment");
+const DirectMessage = require("../models/DirectMessage");
 const Contact = require("../models/Contact");
 const Lead = require("../models/Lead");
 const { getAdMagnetConnection } = require("../db");
@@ -195,6 +196,37 @@ async function enrollTargets(campaign, filter) {
   return { ...counts, enrolled: upserted };
 }
 
+// The provider echoes ids for the message it just accepted, under one of
+// several names depending on endpoint. Stored on the history entry so the
+// delivered/read/replied events that arrive later by webhook can be matched
+// to this exact send instead of to a phone number.
+//
+// whatsappMessageId is preferred over localMessageId because that's the id the
+// webhook keys on (see routes/wati.js) — picking the other one here would
+// store an id no inbound event ever matches.
+//
+// Both come back undefined when the provider returns nothing usable, which is
+// common. That isn't fatal: the *MessageSent webhook carries the ids and the
+// phone together, and backfills them onto the enrollment.
+const firstString = (...candidates) => {
+  const found = candidates.find((v) => v !== undefined && v !== null && String(v).length);
+  return found ? String(found) : undefined;
+};
+
+function extractSentMessageId(result) {
+  return firstString(
+    result?.whatsappMessageId,
+    result?.message?.whatsappMessageId,
+    result?.messageId,
+    result?.id,
+    result?.message?.id
+  );
+}
+
+function extractSentLocalMessageId(result) {
+  return firstString(result?.localMessageId, result?.message?.localMessageId);
+}
+
 // Send the current step's message for one enrollment, then advance it to the
 // next step (or mark it completed if that was the last one).
 async function advanceEnrollment(enrollment, campaign) {
@@ -216,7 +248,7 @@ async function advanceEnrollment(enrollment, campaign) {
   }
 
   try {
-    await whatsappProvider.sendMessage({
+    const sendResult = await whatsappProvider.sendMessage({
       phone: enrollment.phone,
       templateId: step.templateId,
       meta: step.providerMeta,
@@ -228,6 +260,8 @@ async function advanceEnrollment(enrollment, campaign) {
       templateId: step.templateId,
       sentAt: new Date(),
       status: "sent",
+      providerMessageId: extractSentMessageId(sendResult),
+      providerLocalMessageId: extractSentLocalMessageId(sendResult),
     });
 
     const nextIndex = enrollment.currentStepIndex + 1;
@@ -257,11 +291,37 @@ async function advanceEnrollment(enrollment, campaign) {
 }
 
 // Send one WhatsApp template message to one phone number directly — no
-// campaign, no enrollment, just a single fire-and-forget send.
+// campaign and no enrollment, but still recorded as a DirectMessage.
+//
+// The record is the whole point: without a row carrying the provider's message
+// ids, the delivered/read/replied events that arrive seconds later have nothing
+// to attach to and are stored unattributed. Writing it here is what makes a
+// manual send trackable on the same footing as a campaign send.
 async function sendSingleMessage({ phone: rawPhone, templateId, providerMeta, channelId }) {
   const phone = cleanPhone(rawPhone);
   if (!phone) throw new Error(`"${rawPhone}" is not a valid phone number`);
-  return whatsappProvider.sendMessage({ phone, templateId, meta: providerMeta, params: [], channelId });
+
+  const base = { phone, templateId, broadcastName: providerMeta?.broadcastName, channelId, sentAt: new Date() };
+
+  let result;
+  try {
+    result = await whatsappProvider.sendMessage({ phone, templateId, meta: providerMeta, params: [], channelId });
+  } catch (err) {
+    // Sending switched off: nothing left our door, so there is no message to
+    // track and a row would read as an attempt that failed. Matches how
+    // advanceEnrollment treats a closed gate.
+    if (err.sendingDisabled) throw err;
+    await DirectMessage.create({ ...base, status: "error", error: err.message });
+    throw err;
+  }
+
+  const record = await DirectMessage.create({
+    ...base,
+    status: "sent",
+    providerMessageId: extractSentMessageId(result),
+    providerLocalMessageId: extractSentLocalMessageId(result),
+  });
+  return { ...result, directMessageId: record._id };
 }
 
 // One poll tick: find due, active enrollments (campaign still active) and

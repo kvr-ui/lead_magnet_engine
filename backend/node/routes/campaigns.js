@@ -1,6 +1,7 @@
 const express = require("express");
 const Campaign = require("../models/Campaign");
 const CampaignEnrollment = require("../models/CampaignEnrollment");
+const MessageEvent = require("../models/MessageEvent");
 const { enrollTargets, previewTargets, sendSingleMessage } = require("../lib/campaignEngine");
 const whatsappProvider = require("../lib/whatsappProvider");
 const { getSourceFields, DYNAMIC_PREFIX, DOCUMENT_PROJECTION } = require("../lib/sourceFields");
@@ -10,6 +11,32 @@ const { asyncRouter } = require("../lib/asyncRouter");
 const router = asyncRouter();
 
 const VALUES_CAP = 200;
+
+// Attach each lead's WhatsApp delivery state to the enrollment rows being
+// returned. The enrollment's own `status` only says how far the drip got
+// ("completed" the instant the last step is handed to the provider) — whether
+// the message actually landed, was read, or bounced lives in MessageEvent.
+//
+// Done as one aggregation over the page rather than per row: a page of 100
+// leads would otherwise be 100 queries.
+async function withDelivery(enrollments) {
+  if (!enrollments.length) return enrollments;
+
+  const ids = enrollments.map((e) => e._id);
+  const rows = await MessageEvent.aggregate([
+    { $match: { enrollment: { $in: ids } } },
+    { $group: { _id: { enrollment: "$enrollment", status: "$status" }, count: { $sum: 1 }, last: { $max: "$receivedAt" } } },
+  ]);
+
+  const byEnrollment = new Map();
+  for (const row of rows) {
+    const key = String(row._id.enrollment);
+    if (!byEnrollment.has(key)) byEnrollment.set(key, {});
+    byEnrollment.get(key)[row._id.status] = { count: row.count, at: row.last };
+  }
+
+  return enrollments.map((e) => ({ ...e, delivery: byEnrollment.get(String(e._id)) || {} }));
+}
 
 // Distinct values (+ counts) for one field of one source — powers the
 // filter builder's value dropdown. `field` is checked against the source's
@@ -163,7 +190,27 @@ router.get("/campaigns", async (_req, res) => {
     byCampaign[key] = byCampaign[key] || {};
     byCampaign[key][c._id.status] = c.count;
   }
-  res.json(campaigns.map((c) => ({ ...c, enrollments: byCampaign[String(c._id)] || {} })));
+
+  // Delivery state per campaign, counted in distinct leads rather than events:
+  // one lead who read a message three times is one read, not three.
+  const deliveryRows = await MessageEvent.aggregate([
+    { $match: { campaign: { $ne: null } } },
+    { $group: { _id: { campaign: "$campaign", status: "$status" }, leads: { $addToSet: "$enrollment" } } },
+  ]);
+  const deliveryByCampaign = {};
+  for (const row of deliveryRows) {
+    const key = String(row._id.campaign);
+    deliveryByCampaign[key] = deliveryByCampaign[key] || {};
+    deliveryByCampaign[key][row._id.status] = row.leads.filter(Boolean).length;
+  }
+
+  res.json(
+    campaigns.map((c) => ({
+      ...c,
+      enrollments: byCampaign[String(c._id)] || {},
+      delivery: deliveryByCampaign[String(c._id)] || {},
+    }))
+  );
 });
 
 // GET /api/campaigns/:id — single campaign detail.
@@ -245,10 +292,18 @@ router.get("/campaigns/:id/enrollments", async (req, res) => {
     CampaignEnrollment.find(filter)
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
-      .limit(limit),
+      .limit(limit)
+      .lean(),
     CampaignEnrollment.countDocuments(filter),
   ]);
-  res.json({ total, count: enrollments.length, page, pageSize: limit, enrollments });
+
+  res.json({
+    total,
+    count: enrollments.length,
+    page,
+    pageSize: limit,
+    enrollments: await withDelivery(enrollments),
+  });
 });
 
 // POST /api/campaigns/:id/enrollments/:enrollmentId/cancel — pull one target out of the drip.

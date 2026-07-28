@@ -44,6 +44,7 @@ const integrationsRouter = require("./routes/integrations");
 const dataSourcesRouter = require("./routes/dataSources");
 const settingsRouter = require("./routes/settings");
 const watiRouter = require("./routes/wati");
+const messageEventsRouter = require("./routes/messageEvents");
 const { startScheduler } = require("./lib/campaignEngine");
 const { requireAdminAuth } = require("./lib/adminAuth");
 const whatsappProvider = require("./lib/whatsappProvider");
@@ -74,6 +75,9 @@ app.use("/api", leadsRouter);
 app.use("/api", contactsRouter);
 app.use("/api", watiRouter);
 app.use("/api", requireAdminAuth, campaignsRouter);
+// Reads back what watiRouter's webhook writes. Behind admin auth on purpose —
+// the webhook itself can't be, but nothing that exposes the data should be.
+app.use("/api", requireAdminAuth, messageEventsRouter);
 app.use("/api", requireAdminAuth, integrationsRouter);
 app.use("/api", requireAdminAuth, dataSourcesRouter);
 app.use("/api", requireAdminAuth, settingsRouter);

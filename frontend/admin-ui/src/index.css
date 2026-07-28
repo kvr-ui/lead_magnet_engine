@@ -688,6 +688,106 @@ select:focus-visible {
   background: var(--accent-soft);
 }
 
+.row-active td {
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* --- WhatsApp delivery reporting --------------------------------------- */
+
+.delivery-funnel {
+  margin: 0.75rem 0 1.25rem;
+}
+
+.funnel-stages {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 0.75rem;
+}
+
+.funnel-stage {
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  padding: 0.6rem 0.75rem;
+}
+
+.funnel-stage-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.funnel-label {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+}
+
+.funnel-count {
+  font-size: 1.25rem;
+  font-weight: 650;
+  color: var(--text-primary);
+}
+
+.funnel-bar {
+  margin: 0.4rem 0 0.25rem;
+  height: 0.3rem;
+  border-radius: 999px;
+  background: var(--bg-inset);
+  overflow: hidden;
+}
+
+.funnel-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width var(--ease);
+}
+
+/* Later funnel stages are the ones worth celebrating, so they warm up:
+   reaching a handset is table stakes, being read and answered is not. */
+.funnel-fill-delivered {
+  background: var(--info);
+}
+
+.funnel-fill-read,
+.funnel-fill-replied {
+  background: var(--success);
+}
+
+.funnel-pct {
+  font-size: 0.75rem;
+}
+
+.timeline-panel {
+  margin-top: 1rem;
+}
+
+.timeline {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0 0 0 0.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.timeline li {
+  border-left: 2px solid var(--border);
+  padding: 0 0 0 0.85rem;
+  font-size: 0.85rem;
+}
+
+.timeline-text {
+  margin-top: 0.25rem;
+  padding: 0.4rem 0.6rem;
+  background: var(--bg-inset);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  white-space: pre-wrap;
+}
+
 .field-picker {
   position: relative;
   display: inline-block;

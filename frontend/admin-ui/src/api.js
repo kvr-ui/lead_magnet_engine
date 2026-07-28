@@ -103,6 +103,45 @@ export function fetchEnrollments(id, status = "", page = 1) {
   return getJSON(`/api/campaigns/${id}/enrollments?${params.toString()}`);
 }
 
+// --- WhatsApp message tracking --------------------------------------
+// Delivery state reported back by the WATI webhook. Separate from a
+// campaign's enrollment counts, which only say how far the drip got — not
+// whether anything actually reached the lead.
+
+export function fetchCampaignDelivery(id) {
+  return getJSON(`/api/campaigns/${id}/delivery`);
+}
+
+export function fetchEnrollmentEvents(enrollmentId) {
+  return getJSON(`/api/enrollments/${enrollmentId}/events`);
+}
+
+// Manual single-number sends. Separate from campaign delivery because they
+// have no campaign to belong to — but tracked the same way, so the same
+// timeline renders for both.
+export function fetchDirectMessages({ page = 1, phone = "" } = {}) {
+  const params = new URLSearchParams({ page });
+  if (phone) params.set("phone", phone);
+  return getJSON(`/api/direct-messages?${params.toString()}`);
+}
+
+export function fetchDirectMessageEvents(id) {
+  return getJSON(`/api/direct-messages/${id}/events`);
+}
+
+export function fetchMessageEvents({ page = 1, status = "", phone = "", campaign = "", linked = "" } = {}) {
+  const params = new URLSearchParams({ page });
+  if (status) params.set("status", status);
+  if (phone) params.set("phone", phone);
+  if (campaign) params.set("campaign", campaign);
+  if (linked) params.set("linked", linked);
+  return getJSON(`/api/message-events?${params.toString()}`);
+}
+
+export function fetchMessageEventStats() {
+  return getJSON("/api/message-events/stats");
+}
+
 // Sent as a POST body rather than a query string: a filter is unbounded in
 // size (an $in over a few hundred picked values is easily tens of KB) and
 // as a URL it blew past the server's header limit, failing with

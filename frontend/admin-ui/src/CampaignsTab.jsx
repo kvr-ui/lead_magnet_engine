@@ -9,13 +9,13 @@ import {
   previewCampaignSend,
   enrollCampaign,
   fetchEnrollments,
-  sendSingleMessage,
   fetchDataSources,
   fetchDataSourceFields,
 } from "./api";
 import LeadsTable from "./LeadsTable";
 import Pager from "./Pager";
 import FilterCondition, { buildMongoFilter } from "./FilterBuilder";
+import { DeliveryFunnel, DeliveryCell, EnrollmentTimeline } from "./MessageDelivery";
 
 const DYNAMIC_PREFIX = "datasource:";
 
@@ -194,102 +194,6 @@ function CreateCampaignForm({ sources, onCreated, onCancel }) {
   );
 }
 
-// --- Send to a single number --------------------------------------------
-
-function SendToNumberForm() {
-  const [phone, setPhone] = useState("");
-  const [templateId, setTemplateId] = useState("");
-  const [broadcastName, setBroadcastName] = useState("");
-  const [channelId, setChannelId] = useState("");
-  const [templates, setTemplates] = useState([]);
-  const [channels, setChannels] = useState([]);
-  const [connected, setConnected] = useState(true);
-  const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState(null);
-  const [error, setError] = useState(null);
-
-  useEffect(() => {
-    fetchTemplates()
-      .then((d) => {
-        setTemplates(d.templates);
-        if (d.connected === false) setConnected(false);
-      })
-      .catch(() => {});
-    fetchChannels()
-      .then((d) => {
-        setChannels(d.channels);
-        if (d.connected === false) setConnected(false);
-      })
-      .catch(() => {});
-  }, []);
-
-  async function handleSubmit(e) {
-    e.preventDefault();
-    setError(null);
-    setResult(null);
-    setBusy(true);
-    try {
-      await sendSingleMessage({ phone, templateId, providerMeta: { broadcastName }, channelId });
-      setResult(`Sent to ${phone}.`);
-      setPhone("");
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  if (!connected) {
-    return (
-      <div className="panel">
-        <h3>Send to a single number</h3>
-        <p className="error">No WhatsApp provider connected — connect one from the Integrations tab first.</p>
-      </div>
-    );
-  }
-
-  return (
-    <form className="panel" onSubmit={handleSubmit}>
-      <h3>Send to a single number</h3>
-      <div className="condition-row">
-        <select value={templateId} onChange={(e) => setTemplateId(e.target.value)} required>
-          <option value="">Pick a template…</option>
-          {templates.map((t) => (
-            <option key={t.id} value={t.id}>
-              {t.id}
-            </option>
-          ))}
-        </select>
-        <input
-          placeholder="Broadcast name"
-          value={broadcastName}
-          onChange={(e) => setBroadcastName(e.target.value)}
-          required
-        />
-        <select value={channelId} onChange={(e) => setChannelId(e.target.value)}>
-          <option value="">Pick a channel…</option>
-          {channels.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.label}
-            </option>
-          ))}
-        </select>
-        <input
-          placeholder="Mobile number"
-          value={phone}
-          onChange={(e) => setPhone(e.target.value)}
-          required
-        />
-        <button type="submit" disabled={busy}>
-          {busy ? "Sending…" : "Send"}
-        </button>
-      </div>
-      {error && <p className="error">{error}</p>}
-      {result && <p className="notice">{result}</p>}
-    </form>
-  );
-}
-
 // --- Campaign detail: filter, preview, send, enrollments -----------------
 
 function CampaignDetail({ campaign, sourceLabels, onClose, onChanged }) {
@@ -303,6 +207,8 @@ function CampaignDetail({ campaign, sourceLabels, onClose, onChanged }) {
   const [statusFilter, setStatusFilter] = useState("");
   const [page, setPage] = useState(1);
   const [enrollments, setEnrollments] = useState({ enrollments: [], total: 0, totalPages: 1 });
+  // The lead whose message timeline is open, if any.
+  const [timelineFor, setTimelineFor] = useState(null);
 
   const [membersPage, setMembersPage] = useState(1);
   const [members, setMembers] = useState({ members: [], total: 0, totalPages: 1 });
@@ -386,7 +292,10 @@ function CampaignDetail({ campaign, sourceLabels, onClose, onChanged }) {
 
   const enrollmentColumns = [
     { key: "phone", header: "Phone", get: (d) => d.phone },
-    { key: "status", header: "Status", get: (d) => d.status },
+    { key: "status", header: "Drip", get: (d) => d.status },
+    // What WhatsApp reported back, as opposed to how far the drip got.
+    { key: "delivery", header: "Delivery", get: (d) => <DeliveryCell delivery={d.delivery} /> },
+    { key: "replied", header: "Replied", get: (d) => (d.delivery?.replied || d.delivery?.received ? "yes" : "") },
     { key: "currentStepIndex", header: "Step", get: (d) => d.currentStepIndex + 1 },
     { key: "nextSendAt", header: "Next Send", get: (d) => (d.nextSendAt ? new Date(d.nextSendAt).toLocaleString() : "") },
     { key: "createdAt", header: "Enrolled", get: (d) => (d.createdAt ? new Date(d.createdAt).toLocaleString() : "") },
@@ -464,6 +373,9 @@ function CampaignDetail({ campaign, sourceLabels, onClose, onChanged }) {
         </p>
       )}
 
+      <h4>Delivery</h4>
+      <DeliveryFunnel campaignId={campaign._id} refreshKey={enrollResult} />
+
       <h4>Enrollments</h4>
       <select value={statusFilter} onChange={(e) => { setStatusFilter(e.target.value); setPage(1); }}>
         <option value="">All statuses</option>
@@ -474,7 +386,16 @@ function CampaignDetail({ campaign, sourceLabels, onClose, onChanged }) {
         <option value="failed">Failed</option>
       </select>
       <Pager page={enrollments.page || page} totalPages={enrollments.totalPages} total={enrollments.total} onChange={setPage} />
-      <LeadsTable columns={enrollmentColumns} rows={enrollments.enrollments} loading={false} error={null} />
+      <p className="muted">Click a lead to see every message event recorded for them.</p>
+      <LeadsTable
+        columns={enrollmentColumns}
+        rows={enrollments.enrollments}
+        loading={false}
+        error={null}
+        onRowClick={setTimelineFor}
+        activeRowId={timelineFor?._id}
+      />
+      {timelineFor && <EnrollmentTimeline enrollment={timelineFor} onClose={() => setTimelineFor(null)} />}
     </div>
   );
 }
@@ -524,8 +445,6 @@ export default function CampaignsTab({ focusCampaignId = null }) {
 
       {!selected && (
         <>
-          <SendToNumberForm />
-
           <button type="button" className="secondary-btn" onClick={() => setShowCreate(!showCreate)}>
             {showCreate ? "Cancel" : "+ New campaign"}
           </button>
@@ -552,6 +471,12 @@ export default function CampaignsTab({ focusCampaignId = null }) {
                   <th>Active</th>
                   <th>Completed</th>
                   <th>Failed</th>
+                  {/* Reported by WhatsApp, not by the drip — a lead can be
+                      "completed" and still never have received anything. */}
+                  <th>Delivered</th>
+                  <th>Read</th>
+                  <th>Replied</th>
+                  <th>Undelivered</th>
                 </tr>
               </thead>
               <tbody>
@@ -570,6 +495,16 @@ export default function CampaignsTab({ focusCampaignId = null }) {
                     <td>{c.enrollments.active || 0}</td>
                     <td>{c.enrollments.completed || 0}</td>
                     <td>{c.enrollments.failed || 0}</td>
+                    <td>{c.delivery?.delivered || 0}</td>
+                    <td>{c.delivery?.read || 0}</td>
+                    <td>{c.delivery?.replied || 0}</td>
+                    <td>
+                      {c.delivery?.failed ? (
+                        <span className="badge badge-danger">{c.delivery.failed}</span>
+                      ) : (
+                        0
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
