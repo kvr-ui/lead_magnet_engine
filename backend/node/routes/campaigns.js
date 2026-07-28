@@ -72,20 +72,31 @@ async function listMembers(source, filter, page, limit) {
   return { members, total };
 }
 
-// GET /api/campaigns/meta/members?source=...&filter=<json>&page=1&limit=50
-router.get("/campaigns/meta/members", async (req, res) => {
+// GET  /api/campaigns/meta/members?source=...&filter=<json>&page=1&limit=50
+// POST /api/campaigns/meta/members  { source, filter, page, limit }
+//
+// Same read either way. POST is what the UI uses: a segment filter with a
+// large $in list overflows Node's 16KB header limit as a query string and
+// the request is rejected with 431 before reaching this handler.
+async function membersHandler(req, res) {
+  const body = req.body || {};
   try {
-    const source = req.query.source;
-    const filter = await validateFilter(source, req.query.filter ? JSON.parse(req.query.filter) : {});
-    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+    const source = body.source || req.query.source;
+    const rawFilter = body.filter !== undefined ? body.filter : req.query.filter;
+    const parsed = typeof rawFilter === "string" ? JSON.parse(rawFilter || "{}") : rawFilter || {};
+    const filter = await validateFilter(source, parsed);
+    const page = Math.max(1, parseInt(body.page ?? req.query.page, 10) || 1);
+    const limit = Math.min(parseInt(body.limit ?? req.query.limit, 10) || 50, 200);
 
     const { members, total } = await listMembers(source, filter, page, limit);
     res.json({ members, total, page, pageSize: limit, totalPages: Math.max(1, Math.ceil(total / limit)) });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
-});
+}
+
+router.get("/campaigns/meta/members", membersHandler);
+router.post("/campaigns/meta/members", membersHandler);
 
 // GET /api/campaigns/meta/templates — approved template list from the
 // connected provider, for the campaign builder's template picker (instead

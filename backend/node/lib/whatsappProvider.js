@@ -10,6 +10,7 @@ const crypto = require("crypto");
 const WhatsAppIntegration = require("../models/WhatsAppIntegration");
 const { encrypt, decrypt } = require("./crypto");
 const wati = require("./watiClient");
+const { isSendingEnabled, sendingDisabledError } = require("./sendingSwitch");
 
 const NOT_CONNECTED = "No WhatsApp provider connected — connect one from the Integrations tab";
 
@@ -35,7 +36,11 @@ async function getTemplates() {
   return templates.map((t) => ({ id: t.name, status: t.status }));
 }
 
+// The single gate every outbound message passes through. The kill-switch
+// check is first and unconditional — before the provider lookup, before any
+// network call — so "sending is off" can never be reached past.
 async function sendMessage({ phone, templateId, params, channelId, meta }) {
+  if (!(await isSendingEnabled())) throw sendingDisabledError();
   const doc = await getActiveDoc();
   if (!doc) throw new Error(NOT_CONNECTED);
   return wati.sendTemplateMessage({

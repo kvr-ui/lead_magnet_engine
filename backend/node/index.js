@@ -42,6 +42,7 @@ const adMagnetRouter = require("./routes/adMagnet");
 const campaignsRouter = require("./routes/campaigns");
 const integrationsRouter = require("./routes/integrations");
 const dataSourcesRouter = require("./routes/dataSources");
+const settingsRouter = require("./routes/settings");
 const watiRouter = require("./routes/wati");
 const { startScheduler } = require("./lib/campaignEngine");
 const { requireAdminAuth } = require("./lib/adminAuth");
@@ -75,6 +76,7 @@ app.use("/api", watiRouter);
 app.use("/api", requireAdminAuth, campaignsRouter);
 app.use("/api", requireAdminAuth, integrationsRouter);
 app.use("/api", requireAdminAuth, dataSourcesRouter);
+app.use("/api", requireAdminAuth, settingsRouter);
 app.use("/api/ad-magnet", requireAdminAuth, adMagnetRouter);
 app.use("/admin", requireAdminAuth, adminRouter);
 // React leads dashboard (admin-ui/), built via `npm run build` in that folder.

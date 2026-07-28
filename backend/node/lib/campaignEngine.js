@@ -7,6 +7,7 @@ const { cleanPhone } = require("./phone");
 const whatsappProvider = require("./whatsappProvider");
 const { DYNAMIC_PREFIX } = require("./sourceFields");
 const { wrapWithEnrichment } = require("./enrichedCollection");
+const { isSendingEnabled } = require("./sendingSwitch");
 
 // How many due enrollments to send per poll tick, and the gap between sends —
 // keeps us well under the connected provider's rate limits instead of firing
@@ -238,6 +239,10 @@ async function advanceEnrollment(enrollment, campaign) {
       enrollment.status = "completed";
     }
   } catch (err) {
+    // Sending switched off between the batch being picked up and this send:
+    // nothing was mutated above, so leave the lead queued exactly as it was.
+    // A closed gate must not burn leads as failed.
+    if (err.sendingDisabled) return;
     enrollment.history.push({
       stepIndex: enrollment.currentStepIndex,
       templateId: step.templateId,
@@ -264,6 +269,9 @@ async function sendSingleMessage({ phone: rawPhone, templateId, providerMeta, ch
 // rate limits.
 async function processDueEnrollments() {
   if (!(await whatsappProvider.isConfigured())) return { processed: 0, skipped: "No WhatsApp provider connected" };
+  // Checked here as well as at the provider so a closed gate costs nothing:
+  // due enrollments are never loaded, so none of them can be touched.
+  if (!(await isSendingEnabled())) return { processed: 0, skipped: "Sending is off (test mode)" };
 
   const due = await CampaignEnrollment.find({ status: "active", nextSendAt: { $lte: new Date() } })
     .sort({ nextSendAt: 1 })

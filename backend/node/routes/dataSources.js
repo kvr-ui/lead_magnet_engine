@@ -324,13 +324,24 @@ router.get("/data-sources/:id/fields", async (req, res) => {
   res.json({ fields });
 });
 
-// GET /api/data-sources/:id/documents?page=&limit=&filter=<json>
-router.get("/data-sources/:id/documents", async (req, res) => {
+// GET  /api/data-sources/:id/documents?page=&limit=&filter=<json>
+// POST /api/data-sources/:id/documents  { page, limit, filter }
+//
+// Both do the same read. The POST form exists because a filter is unbounded
+// in size — selecting a few hundred values in the filter builder produces an
+// $in list that pushed the query string past Node's 16KB header limit, and
+// the request came back 431 Request Header Fields Too Large before any
+// handler ran. In the body there's no such ceiling. GET stays for small
+// filters and hand-made requests.
+async function listDocuments(req, res) {
   const source = `${DYNAMIC_PREFIX}${req.params.id}`;
+  const body = req.body || {};
+  const rawFilter = body.filter !== undefined ? body.filter : req.query.filter;
   try {
-    const filter = await validateFilter(source, req.query.filter ? JSON.parse(req.query.filter) : {});
-    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-    const limit = Math.min(parseInt(req.query.limit, 10) || 50, DOCS_PAGE_LIMIT);
+    const parsed = typeof rawFilter === "string" ? JSON.parse(rawFilter || "{}") : rawFilter || {};
+    const filter = await validateFilter(source, parsed);
+    const page = Math.max(1, parseInt(body.page ?? req.query.page, 10) || 1);
+    const limit = Math.min(parseInt(body.limit ?? req.query.limit, 10) || 50, DOCS_PAGE_LIMIT);
     const skip = (page - 1) * limit;
 
     const { getSourceHandle } = require("../lib/sourceData");
@@ -343,7 +354,10 @@ router.get("/data-sources/:id/documents", async (req, res) => {
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
-});
+}
+
+router.get("/data-sources/:id/documents", listDocuments);
+router.post("/data-sources/:id/documents", listDocuments);
 
 // DELETE /api/data-sources/:id
 router.delete("/data-sources/:id", async (req, res) => {
