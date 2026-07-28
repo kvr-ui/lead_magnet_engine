@@ -1,7 +1,37 @@
+// Not every response is JSON, even when it should be: a dead or restarting
+// backend gives an empty body, and the dev proxy answers with plain text when
+// it can't reach the API at all. Calling res.json() on those threw a raw
+// "JSON.parse: unexpected end of data at line 1 column 1", which tells nobody
+// anything. Read the body as text first and turn the non-JSON cases into a
+// message that names the actual problem.
+async function readBody(res) {
+  const text = await res.text();
+  if (!text.trim()) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { error: text.trim().slice(0, 300) };
+  }
+}
+
+function bodyError(res, body) {
+  if (body) return new Error(body.detail || body.error || `Request failed: ${res.status}`);
+  return new Error(
+    res.status === 0 || res.status >= 500
+      ? `The server returned an empty response (${res.status || "no status"}). It may have crashed or be restarting — check the backend is running.`
+      : `Request failed: ${res.status} ${res.statusText}`
+  );
+}
+
 async function getJSON(url) {
   const res = await fetch(url);
-  const body = await res.json();
-  if (!res.ok) throw new Error(body.error || `Request failed: ${res.status}`);
+  const body = await readBody(res);
+  if (!res.ok || body === null) {
+    const err = bodyError(res, body);
+    err.status = res.status;
+    err.body = body;
+    throw err;
+  }
   return body;
 }
 
@@ -11,9 +41,9 @@ async function sendJSON(method, url, data) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data ?? {}),
   });
-  const body = await res.json();
-  if (!res.ok) {
-    const err = new Error(body.detail || body.error || `Request failed: ${res.status}`);
+  const body = await readBody(res);
+  if (!res.ok || body === null) {
+    const err = bodyError(res, body);
     // Some endpoints (e.g. data-source create with an ambiguous collection)
     // attach extra structured info to the error body — expose it so callers
     // can react beyond just the message.

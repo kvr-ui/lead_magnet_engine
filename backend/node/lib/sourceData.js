@@ -36,16 +36,26 @@ function isScalar(v) {
   return v === null || ["string", "number", "boolean"].includes(typeof v);
 }
 
+// Numeric comparisons the filter builder's "compare number" mode can emit
+// (e.g. an enrichment sum field like totalAttempted < 1) — deliberately not
+// $eq/$ne (plain equality already goes through the $in case) or anything
+// that isn't a bounded numeric check.
+const COMPARISON_OPS = new Set(["$lt", "$lte", "$gt", "$gte"]);
+
 // A filter value is safe to pass straight into MongoDB only if it's a plain
-// scalar or an { $in: [...] } of scalars — anything else (raw $where,
-// $expr, nested operators, etc.) is rejected so a query-string filter can't
-// smuggle arbitrary Mongo operators through.
+// scalar, an { $in: [...] } of scalars, or a single numeric comparison —
+// anything else (raw $where, $expr, nested operators, etc.) is rejected so a
+// query-string filter can't smuggle arbitrary Mongo operators through.
 function isSafeValue(v) {
   if (isScalar(v)) return true;
   if (Array.isArray(v)) return false;
   if (v && typeof v === "object") {
     const keys = Object.keys(v);
-    return keys.length === 1 && keys[0] === "$in" && Array.isArray(v.$in) && v.$in.every(isScalar);
+    if (keys.length !== 1) return false;
+    const [key] = keys;
+    if (key === "$in") return Array.isArray(v.$in) && v.$in.every(isScalar);
+    if (COMPARISON_OPS.has(key)) return typeof v[key] === "number";
+    return false;
   }
   return false;
 }

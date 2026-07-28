@@ -1,8 +1,9 @@
 const express = require("express");
 const { getAdMagnetConnection } = require("../db");
 const { getSourceFields } = require("../lib/sourceFields");
+const { asyncRouter } = require("../lib/asyncRouter");
 
-const router = express.Router();
+const router = asyncRouter();
 
 const PAGE_SIZE = 50;
 

@@ -1,7 +1,8 @@
 const express = require("express");
 const whatsappProvider = require("../lib/whatsappProvider");
+const { asyncRouter } = require("../lib/asyncRouter");
 
-const router = express.Router();
+const router = asyncRouter();
 
 router.get("/integrations/whatsapp", async (_req, res) => {
   res.json(await whatsappProvider.status());

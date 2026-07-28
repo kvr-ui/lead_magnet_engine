@@ -4,8 +4,9 @@ const { encrypt } = require("../lib/crypto");
 const { testConnection, evict, getConnectionFor, listDatabases, listCollections } = require("../lib/dataSourcePool");
 const { getSourceFields, sampleFieldKeys, DYNAMIC_PREFIX, DOCUMENT_PROJECTION } = require("../lib/sourceFields");
 const { validateFilter } = require("../lib/sourceData");
+const { asyncRouter } = require("../lib/asyncRouter");
 
-const router = express.Router();
+const router = asyncRouter();
 
 const DOCS_PAGE_LIMIT = 200;
 

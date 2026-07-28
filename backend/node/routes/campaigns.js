@@ -5,8 +5,9 @@ const { enrollTargets, previewTargets, sendSingleMessage } = require("../lib/cam
 const whatsappProvider = require("../lib/whatsappProvider");
 const { getSourceFields, DYNAMIC_PREFIX, DOCUMENT_PROJECTION } = require("../lib/sourceFields");
 const { getSourceHandle, validateFilter } = require("../lib/sourceData");
+const { asyncRouter } = require("../lib/asyncRouter");
 
-const router = express.Router();
+const router = asyncRouter();
 
 const VALUES_CAP = 200;
 

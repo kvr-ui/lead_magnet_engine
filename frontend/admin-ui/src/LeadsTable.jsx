@@ -8,9 +8,15 @@ function cell(value) {
 }
 
 export default function LeadsTable({ columns, rows, loading, error }) {
-  if (loading) return <p className="muted">Loading…</p>;
-  if (error) return <p className="error">{error}</p>;
-  if (!rows.length) return <p className="muted">No documents.</p>;
+  if (loading) {
+    return (
+      <div className="table-wrap table-state">
+        <span className="spinner" /> <span className="muted">Loading…</span>
+      </div>
+    );
+  }
+  if (error) return <div className="table-wrap table-state error">{error}</div>;
+  if (!rows.length) return <div className="table-wrap table-state muted">No documents.</div>;
 
   return (
     <div className="table-wrap">

@@ -20,7 +20,10 @@ export default function App() {
 
   return (
     <div className="page">
-      <h1>Leads</h1>
+      <div className="app-header">
+        <h1>Leads</h1>
+        <span className="muted">Contacts, campaigns &amp; integrations</span>
+      </div>
       <div className="tabs">
         <button type="button" className={`tab ${tab === "zoho" ? "active" : ""}`} onClick={() => setTab("zoho")}>
           Zoho Contacts

@@ -3,8 +3,9 @@ const whatsappProvider = require("../lib/whatsappProvider");
 const CampaignEnrollment = require("../models/CampaignEnrollment");
 const MessageEvent = require("../models/MessageEvent");
 const { cleanPhone } = require("../lib/phone");
+const { asyncRouter } = require("../lib/asyncRouter");
 
-const router = express.Router();
+const router = asyncRouter();
 
 // WATI's payload shape varies by event (message status vs. inbound reply vs.
 // button click). Pull whatever's there instead of assuming one schema —

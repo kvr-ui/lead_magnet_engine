@@ -2,8 +2,9 @@ const express = require("express");
 const Contact = require("../models/Contact");
 const { requireAdminAuth } = require("../lib/adminAuth");
 const { getSourceFields } = require("../lib/sourceFields");
+const { asyncRouter } = require("../lib/asyncRouter");
 
-const router = express.Router();
+const router = asyncRouter();
 
 // Optional shared secret. Set CONTACTS_WEBHOOK_SECRET in .env and have Zoho
 // Flow send it as ?secret=... or an "x-webhook-secret" header. If unset, the

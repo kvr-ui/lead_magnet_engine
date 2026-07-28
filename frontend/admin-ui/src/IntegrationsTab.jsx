@@ -81,7 +81,7 @@ export default function IntegrationsTab() {
                 ))}
               </ul>
             )}
-            <button type="button" className="secondary-btn" onClick={handleDisconnect}>
+            <button type="button" className="secondary-btn danger" onClick={handleDisconnect}>
               Disconnect
             </button>
 
@@ -123,7 +123,7 @@ export default function IntegrationsTab() {
       </div>
 
       {!status?.connected && (
-        <form className="panel" onSubmit={handleConnect}>
+        <form className="panel panel-form" onSubmit={handleConnect}>
           <h3>Connect WhatsApp (WATI)</h3>
 
           <label className="form-row">

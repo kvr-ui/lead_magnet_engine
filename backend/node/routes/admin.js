@@ -1,4 +1,5 @@
 const express = require("express");
+const { asyncRouter } = require("../lib/asyncRouter");
 const {
   listLeadMagnets,
   createLeadMagnet,
@@ -8,7 +9,7 @@ const {
   deleteLeadMagnet,
 } = require("../lib/leadMagnets");
 
-const router = express.Router();
+const router = asyncRouter();
 
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({

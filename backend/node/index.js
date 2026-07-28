@@ -80,6 +80,15 @@ app.use("/admin", requireAdminAuth, adminRouter);
 // React leads dashboard (admin-ui/), built via `npm run build` in that folder.
 app.use("/admin/leads", requireAdminAuth, express.static(ADMIN_UI_DIST));
 
+// Everything under /api is owned by this server — the Python backend only
+// serves the CSV-cleaner pages at /. Answer unmatched API paths with JSON
+// here rather than letting them fall through to the proxy below, which
+// replies with a plain-text 504 when Python isn't running ("Error occurred
+// while trying to proxy: ...") — not something the admin UI can parse.
+app.use("/api", (req, res) => {
+  res.status(404).json({ error: `No such API route: ${req.method} ${req.originalUrl}` });
+});
+
 app.use(
   "/",
   createProxyMiddleware({
@@ -89,6 +98,43 @@ app.use(
     logger: console,
   })
 );
+
+// Last stop for anything a route handler threw or rejected with (async
+// handlers are funnelled here by lib/asyncRouter). Without this Express
+// answers with an HTML error page, and the admin UI's fetch wrapper can't
+// pull a message out of it.
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, _next) => {
+  const status = err.status || err.statusCode || (err.name === "CastError" || err.name === "ValidationError" ? 400 : 500);
+  console.error(`[error] ${req.method} ${req.originalUrl} -> ${status}:`, err);
+  if (res.headersSent) return res.end();
+  res.status(status).json({
+    error: status === 400 ? "Invalid request" : "Internal server error",
+    detail: err.message,
+  });
+});
+
+// Safety net for anything that escapes a request (a rejected promise in the
+// campaign scheduler, a late callback). Once we're serving, log loudly but
+// stay up: this process is the only thing serving the admin UI, and
+// `node --watch` does NOT restart after a crash — it waits for the next file
+// change — so exiting means a silent outage until someone notices.
+//
+// Before that point the same leniency would be wrong: a failure during
+// startup (a bad MONGODB_URI, port already in use) would leave a process
+// running that never listens, so those still exit.
+let serving = false;
+
+function survive(label, err) {
+  if (!serving) {
+    console.error(`Failed to start server (${label}):`, err);
+    process.exit(1);
+  }
+  console.error(`[${label}] server kept alive:`, err);
+}
+
+process.on("unhandledRejection", (reason) => survive("unhandledRejection", reason));
+process.on("uncaughtException", (err) => survive("uncaughtException", err));
 
 // One-time bootstrap: if nothing's been connected via the Integrations tab
 // yet but WATI_* env vars are set (the old hardcoded config), migrate them
@@ -126,6 +172,7 @@ async function start() {
   await migrateWatiEnvConfigIfNeeded();
   startScheduler();
   app.listen(PORT, HOST, () => {
+    serving = true;
     console.log(`Express proxy listening on http://${HOST}:${PORT}`);
     console.log(`Forwarding to Python backend at ${PY_TARGET}`);
     console.log(`Lead magnet admin UI at /admin/lead-magnets`);

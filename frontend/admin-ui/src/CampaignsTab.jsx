@@ -102,7 +102,7 @@ function CreateCampaignForm({ sources, onCreated, onCancel }) {
   }
 
   return (
-    <form className="panel" onSubmit={handleSubmit}>
+    <form className="panel panel-form" onSubmit={handleSubmit}>
       <h3>New campaign</h3>
       {error && <p className="error">{error}</p>}
       {!providerConnected && (
@@ -558,7 +558,13 @@ export default function CampaignsTab() {
                     <td>{c.name}</td>
                     <td>{sourceLabels[c.targetModel] || c.targetModel}</td>
                     <td>{c.steps.length}</td>
-                    <td>{c.active ? "active" : "paused"}</td>
+                    <td>
+                      {c.active ? (
+                        <span className="badge badge-success">Active</span>
+                      ) : (
+                        <span className="badge badge-neutral">Paused</span>
+                      )}
+                    </td>
                     <td>{c.enrollments.active || 0}</td>
                     <td>{c.enrollments.completed || 0}</td>
                     <td>{c.enrollments.failed || 0}</td>

@@ -2,8 +2,9 @@ const express = require("express");
 const Lead = require("../models/Lead");
 const { getLeadMagnet, listLeadMagnets, validateExtraFields } = require("../lib/leadMagnets");
 const { requireAdminAuth } = require("../lib/adminAuth");
+const { asyncRouter } = require("../lib/asyncRouter");
 
-const router = express.Router();
+const router = asyncRouter();
 
 // GET /api/lead-magnets — what's configured right now (for a frontend picker, etc.)
 router.get("/lead-magnets", (_req, res) => {

@@ -147,7 +147,7 @@ function EnrichEditor({ ds, onSaved, onClose }) {
           {saving ? "Saving…" : "Save enrichment"}
         </button>
         {ds.enrich && (
-          <button type="button" className="secondary-btn" onClick={handleRemove} disabled={saving}>
+          <button type="button" className="secondary-btn danger" onClick={handleRemove} disabled={saving}>
             Remove enrichment
           </button>
         )}
@@ -339,13 +339,19 @@ export default function DataSourcesTab({ onChanged }) {
                       </td>
                       <td>
                         {ds.status === "connected" ? (
-                          <span className="notice">connected</span>
+                          <span className="badge badge-success">Connected</span>
                         ) : (
-                          <span className="error" title={ds.lastError}>error</span>
+                          <span className="badge badge-danger" title={ds.lastError}>Error</span>
                         )}
                       </td>
                       <td>{ds.fieldsCache?.length || 0}</td>
-                      <td>{ds.active ? "yes" : "disabled"}</td>
+                      <td>
+                        {ds.active ? (
+                          <span className="badge badge-success">Active</span>
+                        ) : (
+                          <span className="badge badge-neutral">Disabled</span>
+                        )}
+                      </td>
                       <td>
                         <button type="button" className="link-btn" disabled={busyId === ds._id} onClick={() => handleTest(ds)}>
                           Test
@@ -360,7 +366,7 @@ export default function DataSourcesTab({ onChanged }) {
                         >
                           {enrichOpenId === ds._id ? "Close" : ds.enrich ? "Edit enrichment" : "Enrich"}
                         </button>{" "}
-                        <button type="button" className="link-btn" disabled={busyId === ds._id} onClick={() => handleDelete(ds)}>
+                        <button type="button" className="link-btn danger" disabled={busyId === ds._id} onClick={() => handleDelete(ds)}>
                           Delete
                         </button>
                       </td>
@@ -387,7 +393,7 @@ export default function DataSourcesTab({ onChanged }) {
         )}
       </div>
 
-      <form className="panel" onSubmit={handleConnect}>
+      <form className="panel panel-form" onSubmit={handleConnect}>
         <h3>Connect a new data source</h3>
         <p className="muted">
           Paste a lead magnet's own MongoDB connection string and pick its database. Fields are auto-discovered — a new
