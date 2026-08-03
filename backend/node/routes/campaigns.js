@@ -220,10 +220,35 @@ router.get("/campaigns/:id", async (req, res) => {
   res.json(campaign);
 });
 
-// PATCH /api/campaigns/:id — update fields (e.g. { active: false } to pause sending).
+// PATCH /api/campaigns/:id — update fields (e.g. { active: false } to pause
+// sending, { autoEnroll: false } to stop rescanning the source).
 router.patch("/campaigns/:id", async (req, res) => {
   try {
-    const campaign = await Campaign.findByIdAndUpdate(req.params.id, req.body, {
+    const body = { ...(req.body || {}) };
+
+    if (body.autoEnroll === true || body.autoEnrollFilter !== undefined) {
+      const existing = await Campaign.findById(req.params.id).lean();
+      if (!existing) return res.status(404).json({ error: "Campaign not found" });
+
+      // Arming auto-enroll is the enroll endpoint's job, because that's the
+      // only path where the filter being stored is one the admin previewed.
+      // Turning it on here would run whatever autoEnrollFilter happens to be
+      // on the document — `{}` on a campaign that never armed, i.e. everyone
+      // in the source. Turning it *off* stays allowed: stopping is never the
+      // risky direction.
+      if (body.autoEnroll === true && !Object.keys(existing.autoEnrollFilter || {}).length) {
+        return res.status(400).json({
+          error: "Turn auto-enroll on from the send flow, so the segment it repeats is one you previewed",
+        });
+      }
+      // A filter reaching the scheduler must clear the same whitelist as one
+      // reaching a query directly — it's replayed against the source unattended.
+      if (body.autoEnrollFilter !== undefined) {
+        body.autoEnrollFilter = await validateFilter(existing.targetModel, body.autoEnrollFilter || {});
+      }
+    }
+
+    const campaign = await Campaign.findByIdAndUpdate(req.params.id, body, {
       new: true,
       runValidators: true,
     });
@@ -270,14 +295,32 @@ router.post("/campaigns/:id/preview", async (req, res) => {
 });
 
 // POST /api/campaigns/:id/enroll — enroll every target matching `filter` into this campaign.
-// Body: { filter?: {...} }  e.g. { filter: { leadMagnet: "ca-guru-ai" } } or { filter: { caStatus: "Final" } }
+// Body: { filter?: {...}, autoEnroll?: boolean }
+//   e.g. { filter: { leadMagnet: "ca-guru-ai" } } or { filter: { caStatus: "Final" } }
 // Already-enrolled targets are skipped (safe to call again with a wider filter).
+//
+// autoEnroll: true also stores this exact filter as the campaign's standing
+// segment, so the scheduler keeps re-running it and targets that reach the
+// source later still join the drip. Arming happens here rather than on PATCH
+// deliberately — the stored filter is then always one the admin previewed and
+// confirmed on a real send, never an empty "everyone" filter set by accident.
 router.post("/campaigns/:id/enroll", async (req, res) => {
   const campaign = await Campaign.findById(req.params.id);
   if (!campaign) return res.status(404).json({ error: "Campaign not found" });
   try {
-    const result = await enrollTargets(campaign, req.body?.filter || {});
-    res.status(201).json(result);
+    const filter = await validateFilter(campaign.targetModel, req.body?.filter || {});
+    const result = await enrollTargets(campaign, filter);
+    if (req.body?.autoEnroll !== undefined) {
+      campaign.autoEnroll = Boolean(req.body.autoEnroll);
+      if (campaign.autoEnroll) {
+        campaign.autoEnrollFilter = filter;
+        campaign.lastAutoEnrollAt = new Date();
+        campaign.lastAutoEnrollCount = result.enrolled;
+        campaign.lastAutoEnrollError = null;
+      }
+      await campaign.save();
+    }
+    res.status(201).json({ ...result, autoEnroll: campaign.autoEnroll });
   } catch (err) {
     res.status(400).json({ error: "Enroll failed", detail: err.message });
   }

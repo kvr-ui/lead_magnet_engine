@@ -16,7 +16,7 @@ import {
 } from "./api";
 import LeadsTable from "./LeadsTable";
 import Pager from "./Pager";
-import FilterCondition, { buildMongoFilter } from "./FilterBuilder";
+import FilterCondition, { buildMongoFilter, describeFilter } from "./FilterBuilder";
 import { DeliveryFunnel, DeliveryCell, EnrollmentTimeline } from "./MessageDelivery";
 import CampaignActivity from "./LeadActivity";
 
@@ -206,6 +206,11 @@ function CampaignDetail({ campaign, sourceLabels, onClose, onChanged }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [enrollResult, setEnrollResult] = useState(null);
+  // Whether the send being set up should also arm auto-enroll. Seeded from the
+  // campaign so re-sending an already-armed campaign doesn't silently disarm
+  // it, and re-synced because the panel stays mounted across reloads.
+  const [armAuto, setArmAuto] = useState(Boolean(campaign.autoEnroll));
+  useEffect(() => setArmAuto(Boolean(campaign.autoEnroll)), [campaign._id, campaign.autoEnroll]);
 
   const [statusFilter, setStatusFilter] = useState("");
   const [page, setPage] = useState(1);
@@ -269,18 +274,24 @@ function CampaignDetail({ campaign, sourceLabels, onClose, onChanged }) {
     const confirmed = window.confirm(
       `Send "${campaign.name}" to ${preview.willEnroll} ${sourceLabels[campaign.targetModel] || campaign.targetModel}?\n\n` +
         `${preview.matched} matched, ${preview.alreadyEnrolled} already enrolled, ` +
-        `${preview.skippedNoPhone + preview.skippedBadPhone} skipped (no/invalid phone).`
+        `${preview.skippedNoPhone + preview.skippedBadPhone} skipped (no/invalid phone).` +
+        (armAuto
+          ? `\n\nAuto-enroll ON — this segment keeps running, so anyone matching it later joins automatically.`
+          : "")
     );
     if (!confirmed) return;
 
     setError(null);
     setBusy(true);
     try {
-      const result = await enrollCampaign(campaign._id, filter);
+      const result = await enrollCampaign(campaign._id, filter, armAuto);
       setEnrollResult(result);
       setPreview(null);
       setPreviewedKey(null);
       setConditions([]);
+      // The stored segment shown below comes off the campaign document, so it
+      // has to be refetched for arming to be visible without a page reload.
+      if (armAuto) onChanged();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -291,6 +302,16 @@ function CampaignDetail({ campaign, sourceLabels, onClose, onChanged }) {
   async function toggleActive() {
     await updateCampaign(campaign._id, { active: !campaign.active });
     onChanged();
+  }
+
+  async function disarmAuto() {
+    setError(null);
+    try {
+      await updateCampaign(campaign._id, { autoEnroll: false });
+      onChanged();
+    } catch (err) {
+      setError(err.message);
+    }
   }
 
   const enrollmentColumns = [
@@ -326,6 +347,25 @@ function CampaignDetail({ campaign, sourceLabels, onClose, onChanged }) {
       {campaign.description && <p className="muted">{campaign.description}</p>}
       {!campaign.active && <p className="notice">Paused — enrolled contacts won't receive further messages until resumed.</p>}
 
+      {campaign.autoEnroll && (
+        <div className="notice">
+          <strong>Auto-enroll is on.</strong> The source is rescanned every few minutes for{" "}
+          <em>{describeFilter(campaign.autoEnrollFilter)}</em>, and anyone new who matches is enrolled and sent step 1.{" "}
+          <button type="button" className="link-btn" onClick={disarmAuto}>
+            turn off
+          </button>
+          <br />
+          <span className="muted">
+            {campaign.lastAutoEnrollError
+              ? `Last check failed: ${campaign.lastAutoEnrollError}`
+              : campaign.lastAutoEnrollAt
+                ? `Last checked ${new Date(campaign.lastAutoEnrollAt).toLocaleString()} — added ${campaign.lastAutoEnrollCount || 0}.`
+                : "Not checked yet."}
+            {!campaign.active && " Paused, so rescanning is stopped too."}
+          </span>
+        </div>
+      )}
+
       <h4>Build a segment</h4>
       {conditions.map((c, i) => (
         <FilterCondition
@@ -359,7 +399,16 @@ function CampaignDetail({ campaign, sourceLabels, onClose, onChanged }) {
         <button type="button" onClick={handleSend} disabled={busy || previewedKey !== filterKey}>
           Send campaign
         </button>
+        <label className="inline-check">
+          <input type="checkbox" checked={armAuto} onChange={(e) => setArmAuto(e.target.checked)} />{" "}
+          Keep this segment running
+        </label>
       </div>
+      <p className="muted">
+        {armAuto
+          ? "New matches in the source will join this campaign automatically — no need to send again."
+          : "One-off send: only who matches right now is enrolled. Anyone added to the source later is not."}
+      </p>
 
       {preview && previewedKey === filterKey && (
         <p className="muted">
@@ -542,6 +591,13 @@ export default function CampaignsTab({ focusCampaignId = null }) {
                         <span className="badge badge-success">Active</span>
                       ) : (
                         <span className="badge badge-neutral">Paused</span>
+                      )}{" "}
+                      {/* Whether the campaign keeps picking up new arrivals is
+                          as much a part of its status as whether it's sending. */}
+                      {c.autoEnroll && (
+                        <span className="badge badge-info" title="New matches in the source are enrolled automatically">
+                          Auto
+                        </span>
                       )}
                     </td>
                     <td>{c.enrollments.active || 0}</td>

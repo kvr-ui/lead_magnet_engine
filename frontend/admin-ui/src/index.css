@@ -331,6 +331,24 @@ h3 {
   color: var(--text-secondary);
 }
 
+.badge-info {
+  background: var(--accent-soft);
+  color: var(--info);
+}
+
+/* Checkbox sitting on the same row as the buttons it qualifies (e.g. the
+   auto-enroll opt-in beside "Send campaign"), rather than stacked above them
+   as a form field in its own right. */
+.inline-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
 .table-wrap {
   overflow-x: auto;
   margin: 0.75rem 0;

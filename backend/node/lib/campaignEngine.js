@@ -16,6 +16,10 @@ const { isSendingEnabled } = require("./sendingSwitch");
 const BATCH_SIZE = parseInt(process.env.CAMPAIGN_BATCH_SIZE, 10) || 20;
 const SEND_GAP_MS = parseInt(process.env.CAMPAIGN_SEND_GAP_MS, 10) || 1000;
 const POLL_INTERVAL_MS = parseInt(process.env.CAMPAIGN_POLL_INTERVAL_MS, 10) || 5 * 60 * 1000;
+// How often armed campaigns rescan their source for newly-matching targets.
+// Separate from the send poll because it's a different kind of work: a full
+// scan of an external database rather than a read of our own due queue.
+const AUTO_ENROLL_INTERVAL_MS = parseInt(process.env.CAMPAIGN_AUTO_ENROLL_INTERVAL_MS, 10) || 5 * 60 * 1000;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -361,7 +365,53 @@ async function processDueEnrollments() {
   return { processed };
 }
 
+// One auto-enroll tick: for every active campaign with autoEnroll armed,
+// re-run its stored segment so anyone who has since appeared in the source
+// joins the drip on the next send cycle.
+//
+// This is a full rescan per armed campaign, not an incremental "what's new
+// since last tick". That's deliberate — a target can start matching without
+// being new (CA Guru flipping an existing user's caStatus to "Final"), which
+// a created-after-X watermark would never see. The cost is one projected find
+// over the source per armed campaign per tick.
+//
+// Safe to re-run: enrollTargets upserts on (campaign, targetModel, targetId),
+// so already-enrolled targets are skipped rather than restarted at step 0.
+async function processAutoEnroll() {
+  // Gated on the same kill switch as sending. Enrolling isn't sending, but
+  // quietly stacking up thousands of queued leads while the admin believes
+  // they're in test mode is a nasty surprise when the switch goes back on.
+  // Skipping costs nothing precisely because this is a full rescan: whoever
+  // was missed during the pause is picked up by the first tick after it.
+  if (!(await isSendingEnabled())) return { campaigns: 0, enrolled: 0, skipped: "Sending is off (test mode)" };
+
+  const campaigns = await Campaign.find({ autoEnroll: true, active: true });
+  let enrolled = 0;
+  for (const campaign of campaigns) {
+    campaign.lastAutoEnrollAt = new Date();
+    try {
+      const result = await enrollTargets(campaign, campaign.autoEnrollFilter || {});
+      enrolled += result.enrolled;
+      campaign.lastAutoEnrollCount = result.enrolled;
+      campaign.lastAutoEnrollError = null;
+      if (result.enrolled) {
+        console.log(`[campaignEngine] auto-enrolled ${result.enrolled} new target(s) into "${campaign.name}"`);
+      }
+    } catch (err) {
+      // One broken source (credentials rotated, collection dropped, phone
+      // field renamed) must not stop the other armed campaigns from running.
+      // Recorded on the campaign so the UI can show why it went quiet.
+      campaign.lastAutoEnrollError = err.message;
+      console.error(`[campaignEngine] auto-enroll failed for "${campaign.name}":`, err.message);
+    }
+    await campaign.save();
+  }
+  return { campaigns: campaigns.length, enrolled };
+}
+
 let pollHandle = null;
+let autoEnrollHandle = null;
+let autoEnrollRunning = false;
 
 // Always polls, regardless of whether a provider is connected at boot —
 // the connection can be made/broken later from the Integrations tab without
@@ -373,6 +423,19 @@ function startScheduler() {
     processDueEnrollments().catch((err) => console.error("[campaignEngine] poll error:", err.message));
   }, POLL_INTERVAL_MS);
   console.log(`[campaignEngine] polling every ${POLL_INTERVAL_MS}ms for due drip messages (when a provider is connected)`);
+
+  autoEnrollHandle = setInterval(() => {
+    // A rescan over a large or slow source can outlast the interval; skip the
+    // tick rather than let two full scans of the same campaign overlap.
+    if (autoEnrollRunning) return;
+    autoEnrollRunning = true;
+    processAutoEnroll()
+      .catch((err) => console.error("[campaignEngine] auto-enroll poll error:", err.message))
+      .finally(() => {
+        autoEnrollRunning = false;
+      });
+  }, AUTO_ENROLL_INTERVAL_MS);
+  console.log(`[campaignEngine] rescanning sources every ${AUTO_ENROLL_INTERVAL_MS}ms for campaigns with auto-enroll on`);
 }
 
 // getAdapter is exported for the read side: showing a lead's details means
@@ -383,6 +446,7 @@ module.exports = {
   previewTargets,
   sendSingleMessage,
   processDueEnrollments,
+  processAutoEnroll,
   startScheduler,
   getAdapter,
 };

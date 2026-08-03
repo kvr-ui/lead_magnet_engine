@@ -42,6 +42,26 @@ const campaignSchema = new Schema(
       validate: (v) => Array.isArray(v) && v.length > 0,
     },
     active: { type: Boolean, default: true },
+    // Re-run this campaign's segment on a schedule, so targets that appear in
+    // the source *after* the manual "Send campaign" click still enter the drip.
+    //
+    // Without this, enrollment is a one-time snapshot: enrollTargets matches
+    // whoever fits the filter at that instant, writes their enrollments, and
+    // nothing ever rescans the source. A lead added to a connected Data Source
+    // an hour later is invisible to the campaign until someone clicks Send again.
+    //
+    // autoEnrollFilter is only ever written from a segment the admin previewed
+    // and confirmed, never a filter posted straight at the API — an empty
+    // filter here means "everyone in the source", which is not something to
+    // arrive at by accident.
+    autoEnroll: { type: Boolean, default: false },
+    autoEnrollFilter: { type: Schema.Types.Mixed, default: {} },
+    // Outcome of the last auto-enroll tick, so an armed campaign that has
+    // quietly stopped picking anyone up (source credentials rotated, phone
+    // field renamed) shows why in the UI instead of just looking idle.
+    lastAutoEnrollAt: { type: Date },
+    lastAutoEnrollCount: { type: Number },
+    lastAutoEnrollError: { type: String },
   },
   { timestamps: true }
 );

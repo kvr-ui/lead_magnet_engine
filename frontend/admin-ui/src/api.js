@@ -99,8 +99,11 @@ export function previewCampaignSend(id, filter) {
   return sendJSON("POST", `/api/campaigns/${id}/preview`, { filter });
 }
 
-export function enrollCampaign(id, filter) {
-  return sendJSON("POST", `/api/campaigns/${id}/enroll`, { filter });
+// autoEnroll stores this filter as the campaign's standing segment, so the
+// backend keeps re-running it and targets added to the source later still
+// join the drip instead of needing another manual send.
+export function enrollCampaign(id, filter, autoEnroll = false) {
+  return sendJSON("POST", `/api/campaigns/${id}/enroll`, { filter, autoEnroll });
 }
 
 export function fetchEnrollments(id, status = "", page = 1) {

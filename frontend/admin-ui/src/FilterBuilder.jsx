@@ -141,4 +141,29 @@ export function buildMongoFilter(conditions) {
   return filter;
 }
 
+const CMP_LABELS = { $lt: "<", $lte: "≤", $gt: ">", $gte: "≥" };
+
+// Human-readable one-liner for a filter buildMongoFilter produced — for the
+// places a segment has to be shown back without the builder UI around it, like
+// the standing segment an auto-enrolling campaign keeps repeating.
+//
+// An empty filter reads as "everyone in this source" rather than as blank:
+// that case is the widest possible segment, not the absence of one, and it
+// should never look like nothing is set.
+export function describeFilter(filter) {
+  const parts = Object.entries(filter || {}).map(([field, value]) => {
+    if (value && typeof value === "object") {
+      if (Array.isArray(value.$in)) {
+        const shown = value.$in.slice(0, 3).join(", ");
+        const rest = value.$in.length - 3;
+        return `${field} is ${shown}${rest > 0 ? ` +${rest} more` : ""}`;
+      }
+      const [op] = Object.keys(value);
+      if (CMP_LABELS[op]) return `${field} ${CMP_LABELS[op]} ${value[op]}`;
+    }
+    return `${field} is ${value}`;
+  });
+  return parts.length ? parts.join(" · ") : "everyone in this source";
+}
+
 export default FilterCondition;
