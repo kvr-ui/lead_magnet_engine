@@ -10,6 +10,8 @@ const W1 = "wamid.TEST.SEND.0001"; // wamid of the message we send
 const L1 = "local-guid-0001"; // WATI's own id for the same message
 const W2 = "wamid.TEST.INBOUND.0002"; // wamid of the lead's reply
 
+const NODE_ID = "verify_msg_node"; // the graph node id this fixture's one message step stands in for
+
 const post = async (body) => {
   const res = await fetch(`${BASE}/api/wati/webhook`, {
     method: "POST",
@@ -70,9 +72,10 @@ const check = (name, pass, detail) => {
     targetId: new m.Types.ObjectId(),
     phone: PHONE,
     status: "completed",
-    currentStepIndex: 0,
+    currentNodeId: NODE_ID,
+    graphVersion: 1,
     nextSendAt: new Date(),
-    history: [{ stepIndex: 0, templateId: "verify_tpl", sentAt: new Date(), status: "sent" }],
+    history: [{ nodeId: NODE_ID, templateId: "verify_tpl", sentAt: new Date(), status: "sent" }],
     createdAt: new Date(),
     updatedAt: new Date(),
   });
