@@ -1,14 +1,10 @@
 const Campaign = require("../models/Campaign");
 const CampaignEnrollment = require("../models/CampaignEnrollment");
 const DirectMessage = require("../models/DirectMessage");
-const Contact = require("../models/Contact");
-const Lead = require("../models/Lead");
 const OptOut = require("../models/OptOut");
-const { getAdMagnetConnection } = require("../db");
 const { cleanPhone } = require("./phone");
 const whatsappProvider = require("./whatsappProvider");
-const { DYNAMIC_PREFIX } = require("./sourceFields");
-const { wrapWithEnrichment } = require("./enrichedCollection");
+const { resolveSource } = require("./sourceResolver");
 const { isSendingEnabled } = require("./sendingSwitch");
 
 // How many due enrollments to send per poll tick, and the gap between sends —
@@ -26,100 +22,13 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function adMagnetCollection() {
-  const conn = getAdMagnetConnection();
-  if (!conn) throw new Error("AD_MAGNET_MONGODB_URI not configured — AdMagnetStudent target unavailable");
-  return conn.db.collection("users");
-}
-
-// One adapter per target source, so enroll/send logic doesn't care whether
-// the target is a Mongoose model (Contact, Lead) or a raw collection on the
-// separate, read-only ad-magnet connection (AdMagnetStudent — CA Guru's
-// `users`, which uses `phoneNumber` instead of `phone` and has no schema here).
-const adapters = {
-  Contact: {
-    async find(filter) {
-      const docs = await Contact.find(filter || {}).select("_id phone").lean();
-      return docs.map((d) => ({ _id: d._id, phone: d.phone }));
-    },
-    findById: (id) => Contact.findById(id).lean(),
-  },
-  Lead: {
-    async find(filter) {
-      const docs = await Lead.find(filter || {}).select("_id phone").lean();
-      return docs.map((d) => ({ _id: d._id, phone: d.phone }));
-    },
-    findById: (id) => Lead.findById(id).lean(),
-  },
-  AdMagnetStudent: {
-    async find(filter) {
-      const docs = await adMagnetCollection().find(filter || {}).project({ phoneNumber: 1 }).toArray();
-      return docs.map((d) => ({ _id: d._id, phone: d.phoneNumber }));
-    },
-    async findById(id) {
-      const doc = await adMagnetCollection().findOne({ _id: id });
-      return doc ? { ...doc, phone: doc.phoneNumber } : null;
-    },
-  },
-};
-
-// Candidate field names (checked case-insensitively against the connection's
-// discovered fields) for the phone number on a user-connected Data Source —
-// there's no per-connection config for this, so it's guessed from common
-// naming conventions.
-const PHONE_FIELD_CANDIDATES = ["phone", "phonenumber", "mobile", "mobilenumber", "contactnumber", "whatsappnumber"];
-
-function guessPhoneField(fieldsCache) {
-  const byLower = new Map((fieldsCache || []).map((k) => [k.toLowerCase(), k]));
-  for (const candidate of PHONE_FIELD_CANDIDATES) {
-    if (byLower.has(candidate)) return byLower.get(candidate);
-  }
-  return null;
-}
-
-// User-connected Data Source ("datasource:<id>") — same shape as the static
-// adapters above, but built on demand since which collection holds the
-// target isn't known ahead of time.
-async function dynamicAdapter(targetModel) {
-  const id = targetModel.slice(DYNAMIC_PREFIX.length);
-  const DataSourceConnection = require("../models/DataSourceConnection");
-  const { getConnectionFor } = require("./dataSourcePool");
-
-  const doc = await DataSourceConnection.findById(id);
-  if (!doc || !doc.active) throw new Error("Unknown or inactive data source");
-  const phoneField = guessPhoneField(doc.fieldsCache);
-  if (!phoneField) throw new Error(`Couldn't find a phone field on data source "${doc.label}"`);
-
-  const conn = await getConnectionFor(doc);
-  const raw = conn.db.collection(doc.collectionName);
-  const collection = doc.enrich ? wrapWithEnrichment(raw, doc.enrich) : raw;
-
-  return {
-    async find(filter) {
-      const docs = await collection.find(filter || {}).project({ [phoneField]: 1 }).toArray();
-      return docs.map((d) => ({ _id: d._id, phone: d[phoneField] }));
-    },
-    async findById(id) {
-      const doc = await collection.findOne({ _id: id });
-      return doc ? { ...doc, phone: doc[phoneField] } : null;
-    },
-  };
-}
-
-async function getAdapter(targetModel) {
-  if (targetModel.startsWith(DYNAMIC_PREFIX)) return dynamicAdapter(targetModel);
-  const adapter = adapters[targetModel];
-  if (!adapter) throw new Error(`Unknown targetModel: ${targetModel}`);
-  return adapter;
-}
-
 // Shared by previewTargets (read-only) and enrollTargets (writes): finds
 // everything matching `filter`, cleans phone numbers, excludes anyone who has
 // opted out, and checks which of what's left is already enrolled in this
 // campaign.
 async function matchTargets(campaign, filter) {
-  const adapter = await getAdapter(campaign.targetModel);
-  const targets = await adapter.find(filter || {});
+  const source = await resolveSource(campaign.targetModel);
+  const targets = await source.find(filter || {});
   const matched = targets.length;
 
   let skippedNoPhone = 0;
@@ -266,8 +175,8 @@ function extractSentLocalMessageId(result) {
 // next step (or mark it completed if that was the last one).
 async function advanceEnrollment(enrollment, campaign) {
   const step = campaign.steps[enrollment.currentStepIndex];
-  const adapter = await getAdapter(enrollment.targetModel);
-  const targetDoc = await adapter.findById(enrollment.targetId);
+  const source = await resolveSource(enrollment.targetModel);
+  const targetDoc = await source.findById(enrollment.targetId);
 
   if (!targetDoc) {
     enrollment.status = "failed";
@@ -456,9 +365,9 @@ function startScheduler() {
   console.log(`[campaignEngine] rescanning sources every ${AUTO_ENROLL_INTERVAL_MS}ms for campaigns with auto-enroll on`);
 }
 
-// getAdapter is exported for the read side: showing a lead's details means
-// loading the target document from whichever source the campaign points at,
-// which is exactly what the adapters already abstract.
+// The read side (showing a lead's details) no longer goes through this module:
+// loading the target document from whichever source the campaign points at is
+// lib/sourceResolver.js's job, and callers reach for it directly.
 module.exports = {
   enrollTargets,
   previewTargets,
@@ -466,5 +375,4 @@ module.exports = {
   processDueEnrollments,
   processAutoEnroll,
   startScheduler,
-  getAdapter,
 };

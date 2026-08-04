@@ -4,7 +4,7 @@ const Campaign = require("../models/Campaign");
 const CampaignEnrollment = require("../models/CampaignEnrollment");
 const DirectMessage = require("../models/DirectMessage");
 const { asyncRouter } = require("../lib/asyncRouter");
-const { getAdapter } = require("../lib/campaignEngine");
+const { resolveSource } = require("../lib/sourceResolver");
 
 const router = asyncRouter();
 
@@ -121,14 +121,14 @@ router.get("/enrollments/:id", async (req, res) => {
   ]);
 
   // The lead itself lives in whichever collection the campaign targets, so it
-  // loads through the same adapter the engine sends through. A source that has
-  // since been disconnected or deleted must not take the whole panel down —
-  // report why the lead is missing and show everything else.
+  // loads through the same source resolver the engine sends through. A source
+  // that has since been disconnected or deleted must not take the whole panel
+  // down — report why the lead is missing and show everything else.
   let lead = null;
   let leadError = null;
   try {
-    const adapter = await getAdapter(enrollment.targetModel);
-    lead = safeFields(await adapter.findById(enrollment.targetId));
+    const source = await resolveSource(enrollment.targetModel);
+    lead = safeFields(await source.findById(enrollment.targetId));
     if (!lead) leadError = "This lead no longer exists in the source collection";
   } catch (err) {
     leadError = err.message;
