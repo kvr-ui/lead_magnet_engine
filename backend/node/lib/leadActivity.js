@@ -562,10 +562,79 @@ async function leadActivityDetail(campaign, leadKey, { windowHours = DEFAULT_WIN
   };
 }
 
+/**
+ * What one lead has done since we last messaged them.
+ *
+ * The rollups above answer a whole-database question ("which campaign
+ * activated whom") and pay for it with a full index build. The graph walker
+ * asks a much smaller one, about a single enrollment, inside a poller tick:
+ * "has this person answered three questions since our last message?" - which
+ * is what a `condition` node's "activity" kind and (later) a `goal` node's
+ * threshold both need.
+ *
+ * So this takes the narrow path where it can: when the campaign targets the
+ * activity source directly, the enrollment's own targetId IS a row over there,
+ * and one projected findOne gets the key. Only when it can't - a campaign that
+ * targets Contacts or Leads, where the phone number is the only thing tying
+ * the two sides together - does it fall back to buildUserIndex, because the
+ * two sides spell phone numbers differently (bare local digits here, WATI's
+ * country-code form there) and that normalisation already lives there.
+ *
+ * `since` defaults to the enrollment's last successful send, falling back to
+ * when it was created if it has never sent - the same "after the message"
+ * cutoff attribution uses everywhere else in this file.
+ */
+async function activitySinceLastSend(enrollment, { since } = {}) {
+  const empty = { configured: false, matched: false, count: 0, correct: 0, graded: 0, since: null, key: null };
+  const source = await getActivitySource();
+  if (!source) return empty;
+
+  const cutoff = since ? new Date(since) : lastSendCutoff(enrollment);
+  const conn = await getConnectionFor(source);
+  const key = await activityKeyFor(source, conn, enrollment);
+  if (key === undefined || key === null) {
+    return { ...empty, configured: true, since: cutoff };
+  }
+
+  const byKey = await fetchActivityRows(source, conn, [key], cutoff);
+  const rows = byKey.get(String(key)) || [];
+  return { configured: true, matched: true, since: cutoff, key, ...summarise(rows) };
+}
+
+// When this enrollment last actually put a message on the wire. Everything
+// before that point is the lead's own doing, not ours.
+function lastSendCutoff(enrollment) {
+  const history = enrollment.history || [];
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i] && history[i].status === "sent" && history[i].sentAt) return new Date(history[i].sentAt);
+  }
+  return enrollment.createdAt ? new Date(enrollment.createdAt) : new Date(0);
+}
+
+// The key this enrollment's lead is recorded under in the activity collection.
+async function activityKeyFor(source, conn, enrollment) {
+  const localField = source.activity.localField;
+
+  // Exact: the campaign targets this very data source, so targetId is one of
+  // its base-collection documents.
+  if (enrollment.targetModel === `${DYNAMIC_PREFIX}${String(source._id)}` && enrollment.targetId) {
+    const doc = await conn.db
+      .collection(source.collectionName)
+      .findOne({ _id: enrollment.targetId }, { projection: { [localField]: 1 } });
+    const key = doc ? doc[localField] : undefined;
+    if (key !== undefined && key !== null && key !== "") return key;
+  }
+
+  if (!enrollment.phone) return undefined;
+  const index = await buildUserIndex(source);
+  return index.byPhone.get(cleanPhone(enrollment.phone));
+}
+
 module.exports = {
   DEFAULT_WINDOW_HOURS,
   getActivitySource,
   campaignActivity,
   activitySummary,
   leadActivityDetail,
+  activitySinceLastSend,
 };

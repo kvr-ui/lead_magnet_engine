@@ -61,4 +61,7 @@ async function validateFilter(source, filter) {
   return filter || {};
 }
 
-module.exports = { getSourceHandle, validateFilter };
+// isSafeValue is exported alongside the validator because the graph walker
+// evaluates the same filter shape in memory (a `filter` node, a "field"
+// condition) and must agree with this file on exactly which shapes exist.
+module.exports = { getSourceHandle, validateFilter, isSafeValue };

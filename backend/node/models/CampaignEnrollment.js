@@ -67,6 +67,18 @@ const enrollmentSchema = new Schema(
     // Node of the pinned version this enrollment is at: about to be processed,
     // or last processed. A node id, not an array index.
     currentNodeId: { type: String, trim: true },
+    // The labelled outcome the walk ended on - an `exit` node's configured
+    // `outcome`. A graph can end in several places ("converted", "unsubscribed",
+    // "no answer") and the status alone flattens all of them to "completed", so
+    // the label is kept separately rather than encoded into the status enum.
+    outcome: { type: String, trim: true },
+    // Why the enrollment is sitting where it is: which node id was missing from
+    // which pinned graph version, which node kind isn't implemented yet, which
+    // cycle tripped the walker's per-tick hop limit. Written on every tick and
+    // cleared on a clean one, so a stale explanation can never outlive the
+    // condition that caused it. Without this a paused enrollment is a dead end
+    // for whoever has to work out what went wrong.
+    statusReason: { type: String, trim: true },
     nextSendAt: { type: Date, required: true, index: true },
     history: { type: [historyEntrySchema], default: [] },
   },
