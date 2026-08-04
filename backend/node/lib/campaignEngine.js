@@ -136,14 +136,15 @@ const UNIT_MS = {
   days: 24 * 60 * 60 * 1000,
 };
 
-// Node kinds this walker recognises but deliberately does not implement yet.
-// How each of them picks its branch is a design decision of its own, and each
-// parks the enrollment with a reason rather than being guessed at here:
-// defaulting a `split` would quietly contaminate a live A/B test, and firing an
-// `action` would make a real external write. Recognising them here, instead of
-// letting them fall through to "unknown kind", is what lets the park message
-// say *why* the lead stopped rather than just that it did.
-const UNIMPLEMENTED_KINDS = new Set(["split", "goal", "action"]);
+// How long an `action` node's outbound call (or source write-back) may take
+// before it is abandoned. An action runs inside the poll tick, so an endpoint
+// that accepts a connection and then never answers would otherwise hold up
+// every other lead in the batch behind it.
+const ACTION_TIMEOUT_MS = parseInt(process.env.CAMPAIGN_ACTION_TIMEOUT_MS, 10) || 10_000;
+
+// The outcome recorded when a `goal` node's threshold is met and nothing
+// further down the "yes" branch labels the ending itself.
+const GOAL_MET_OUTCOME = "goal_met";
 
 // Delivery states a `condition` node's "engagement" kind can ask about. Same
 // vocabulary MessageEvent normalises inbound webhooks into (see
@@ -539,6 +540,216 @@ async function evaluateCondition(node, ctx) {
   throw new Error(`has an unknown condition kind "${config.on}"`);
 }
 
+// --- split -----------------------------------------------------------------
+
+/**
+ * 32-bit FNV-1a over a string. Pure, dependency-free, and — the only property
+ * that actually matters here — identical every time it is given the same
+ * input, in this process or any other.
+ */
+function stableHash(value) {
+  const text = String(value);
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    // The FNV prime, multiplied through Math.imul so the result stays a 32-bit
+    // integer instead of drifting into float precision after a few rounds.
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
+/**
+ * Which side of a `split` this lead falls on.
+ *
+ * Derived from a hash of the enrollment's targetId and nothing else — never
+ * Math.random(), never the clock, never a counter. A lead that is re-evaluated
+ * (walked again after a park, or revisited by a loop) has to land on the same
+ * side every single time: one that flipped would receive both variants of the
+ * A/B test it is in, which both misleads the lead and destroys the result the
+ * split exists to measure.
+ *
+ * `ratio` is the percentage taking branch "a"; the rest take "b". It is
+ * required rather than defaulted, because a split with no ratio has no honest
+ * answer and guessing 50 would quietly invent an experiment nobody designed.
+ */
+function splitBranchFor(node, enrollment) {
+  const config = node.config || {};
+  const ratio = Number(config.ratio);
+  if (!Number.isFinite(ratio) || ratio < 0 || ratio > 100) {
+    throw new Error(`has ratio "${config.ratio}", which is not a percentage between 0 and 100`);
+  }
+  const targetId = enrollment.targetId;
+  if (targetId === undefined || targetId === null || String(targetId) === "") {
+    throw new Error("has no targetId to derive a stable branch from");
+  }
+  return stableHash(String(targetId)) % 100 < ratio ? "a" : "b";
+}
+
+// --- goal ------------------------------------------------------------------
+
+function goalOutcomeFor(node) {
+  const config = node.config || {};
+  return config.outcome || GOAL_MET_OUTCOME;
+}
+
+/**
+ * Has this lead done enough, since we last messaged them, to count as
+ * converted?
+ *
+ *   config: { metric: "count" | "correct" | "graded", threshold: Number,
+ *             outcome?: String }
+ *
+ * The rollup comes from lib/leadActivity.js, which owns the join between an
+ * enrollment and the lead magnet's own activity collection, and whose cutoff is
+ * already the enrollment's last send (falling back to its creation time when it
+ * has never sent). That cutoff is the whole point: activity from before we
+ * messaged them is the lead's own doing and must not be credited to this drip.
+ * Reusing that rollup rather than re-querying here is what keeps the goal node
+ * and the activity reporting screens answering the same question.
+ *
+ * Returns the decision plus the numbers behind it, so the park/branch reason
+ * can say what it actually measured.
+ */
+async function evaluateGoal(node, ctx) {
+  const config = node.config || {};
+  const metric = String(config.metric || "count").toLowerCase();
+  const declared = Number(config.threshold === undefined ? config.count : config.threshold);
+  const threshold = Number.isFinite(declared) ? declared : 1;
+
+  const rollup = await ctx.deps.activitySinceLastSend(ctx.enrollment);
+  // Nothing is connected that records activity at all, so this node cannot
+  // honestly answer its own question. Park rather than pick a branch: routing
+  // every lead down "no" would read as "nobody converted" when the truth is
+  // "nobody was measured".
+  if (!rollup.configured) {
+    throw new Error("needs a data source with an activity config, and none is connected");
+  }
+
+  const value = (metric === "correct" ? rollup.correct : metric === "graded" ? rollup.graded : rollup.count) || 0;
+  return { met: value >= threshold, value, threshold, metric, since: rollup.since };
+}
+
+// --- action ----------------------------------------------------------------
+
+/**
+ * The one node kind that writes. Two shapes, told apart by `config.mode` and,
+ * when that is absent, by which keys are present:
+ *
+ *   { mode: "http",   url, method, body, enabled: true }
+ *   { mode: "source", field, value, enabled: true }
+ *
+ * Both interpolate canonical lead values into their strings as {{phone}},
+ * {{name}}, … read off the same live document a message node renders its
+ * template params from — so an action addresses a lead the same way every
+ * other node does, by canonical key rather than by whatever the source calls
+ * its columns.
+ */
+function actionModeFor(config) {
+  const declared = normalizeBranch(config.mode);
+  if (declared === "http" || declared === "source") return declared;
+  if (config.url) return "http";
+  if (config.field) return "source";
+  return null;
+}
+
+function interpolate(value, doc) {
+  if (typeof value === "string") {
+    return value.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_whole, key) => formatParamValue((doc || {})[key]));
+  }
+  if (Array.isArray(value)) return value.map((entry) => interpolate(entry, doc));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, interpolate(entry, doc)]));
+  }
+  return value;
+}
+
+// A hard wall-clock bound around a promise that has its own, softer idea of a
+// timeout. maxTimeMS bounds how long MongoDB will *execute* a write; it says
+// nothing about a connection that never answers. This says something about it.
+function withTimeout(promise, timeoutMs, what) {
+  let timer;
+  return Promise.race([
+    Promise.resolve(promise).finally(() => clearTimeout(timer)),
+    new Promise((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`${what} timed out after ${timeoutMs}ms`)), timeoutMs);
+    }),
+  ]);
+}
+
+async function performHttpAction(config, doc, { timeoutMs }) {
+  const url = interpolate(String(config.url || ""), doc);
+  if (!url) throw new Error("has no url to call");
+  const method = String(config.method || "POST").toUpperCase();
+  const sendsBody = method !== "GET" && method !== "HEAD" && config.body !== undefined && config.body !== null;
+  const body = sendsBody ? interpolate(config.body, doc) : undefined;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      method,
+      headers: sendsBody ? { "content-type": "application/json" } : undefined,
+      body: sendsBody ? (typeof body === "string" ? body : JSON.stringify(body)) : undefined,
+      signal: controller.signal,
+    });
+    // Any non-2xx is a failure. The lead must not walk on as though the write
+    // landed just because the endpoint answered.
+    if (!response.ok) throw new Error(`${method} ${url} returned ${response.status}`);
+    return { detail: `${method} ${url} returned ${response.status}` };
+  } catch (err) {
+    if (err.name === "AbortError") throw new Error(`${method} ${url} timed out after ${timeoutMs}ms`);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// `field` names a raw field on the source's own documents (not a canonical
+// key): this writes back into the lead magnet's collection, so it has to speak
+// that collection's own vocabulary. `value` may still interpolate canonical
+// keys, which is the direction that does translate.
+async function performSourceWriteAction(config, doc, ctx, { timeoutMs }) {
+  const field = String(config.field || "");
+  if (!field) throw new Error("names no source field to write back to");
+  const value = interpolate(config.value === undefined ? "" : config.value, doc);
+  const source = await ctx.source();
+  const targetId = ctx.enrollment.targetId;
+
+  const update =
+    source.kind === "model"
+      ? source.model.updateOne({ _id: targetId }, { $set: { [field]: value } }).maxTimeMS(timeoutMs)
+      : source.collection.updateOne({ _id: targetId }, { $set: { [field]: value } }, { maxTimeMS: timeoutMs });
+
+  const outcome = await withTimeout(update, timeoutMs, `writing "${field}" back to the source`);
+  if (!outcome || outcome.matchedCount === 0) {
+    throw new Error(`no source document matched ${targetId}, so "${field}" was not written`);
+  }
+  return { detail: `set "${field}" on source document ${targetId}` };
+}
+
+// The real executor. Exported so the verify harness can drive the genuine
+// timeout/failure paths against a server it controls, rather than asserting
+// against a stand-in that only claims to time out.
+async function performAction(node, ctx) {
+  const config = node.config || {};
+  const declaredTimeout = Number(config.timeoutMs);
+  const timeoutMs = Number.isFinite(declaredTimeout) && declaredTimeout > 0 ? declaredTimeout : ACTION_TIMEOUT_MS;
+  const mode = actionModeFor(config);
+  const doc = await ctx.target();
+
+  if (mode === "http") return performHttpAction(config, doc, { timeoutMs });
+  if (mode === "source") return performSourceWriteAction(config, doc, ctx, { timeoutMs });
+  throw new Error('is neither an HTTP call (needs "url") nor a source write-back (needs "field")');
+}
+
+// What a dry run gets instead. The same guarantee noopSender gives for sends:
+// "no side effect" is a property of which function is wired in, not a promise
+// made by the one that would have made the call.
+async function noopActionRunner(node) {
+  return { detail: `dry run — action node "${node.id}" was not performed`, dryRun: true };
+}
+
 // --- message rendering -----------------------------------------------------
 
 function formatParamValue(value) {
@@ -580,15 +791,19 @@ function renderParams(node, doc) {
 
 function emptyResult() {
   return {
-    // How the tick ended: "sent", "waiting", "completed", "paused", "failed",
-    // or "gated" (the kill switch or the allowlist refused the send, so
-    // nothing at all is applied to the enrollment).
+    // How the tick ended: "sent", "acted", "waiting", "completed", "paused",
+    // "failed", or "gated" (the kill switch or the allowlist refused the send
+    // or the action, so nothing at all is applied to the enrollment).
     stop: null,
     reason: null,
     status: null,
     currentNodeId: undefined,
     nextSendAt: null,
     exitOutcome: null,
+    // Set when a `goal` node's threshold was met during this walk, so an
+    // unlabelled exit downstream can inherit the conversion. Walk-local: it is
+    // never written to the enrollment, only folded into exitOutcome.
+    goalOutcome: null,
     history: [],
     visited: [],
     path: [],
@@ -621,6 +836,7 @@ function defaultDeps() {
   return {
     resolveSource,
     MessageEvent,
+    isSendingEnabled,
     activitySinceLastSend: (...args) => require("./leadActivity").activitySinceLastSend(...args),
   };
 }
@@ -658,14 +874,23 @@ async function runWalk(enrollment, campaign, ctx) {
   for (const node of version.nodes || []) if (node && node.id) nodesById.set(node.id, node);
 
   const { sourceId, map } = sourceContextFor(version, enrollment);
+  let sourceHandle;
   let targetDoc;
   let targetRead = false;
+  // The resolved source itself, memoised per tick. Reading the lead only needs
+  // ctx.target() below; an `action` node's source write-back needs the handle,
+  // because it writes to the source's own collection rather than to a
+  // canonical view of it.
+  ctx.source = async () => {
+    if (!sourceHandle) sourceHandle = await ctx.deps.resolveSource(sourceId, map);
+    return sourceHandle;
+  };
   // One live read per tick, shared by every node that needs it. "Live" is the
   // point - a message node's params and a field condition's comparison both
   // have to see the lead as they are now, not as they were when enrolled.
   ctx.target = async () => {
     if (!targetRead) {
-      const source = await ctx.deps.resolveSource(sourceId, map);
+      const source = await ctx.source();
       targetDoc = await source.findById(enrollment.targetId);
       targetRead = true;
     }
@@ -722,12 +947,120 @@ async function runWalk(enrollment, campaign, ctx) {
       return edge.to;
     };
 
-    if (UNIMPLEMENTED_KINDS.has(node.kind)) {
-      // A deliberate stub, not an oversight. Parked with the node it stopped
-      // on still as currentNodeId, so implementing the handler is enough to
-      // let the lead carry on from exactly where it stood.
-      result.currentNodeId = node.id;
-      return park(result, "paused", `${node.kind} node handling not yet implemented (node "${node.id}")`);
+    if (node.kind === "split") {
+      let branch;
+      try {
+        branch = splitBranchFor(node, enrollment);
+      } catch (err) {
+        result.currentNodeId = node.id;
+        return park(result, "paused", `split node "${node.id}" ${err.message}`);
+      }
+      const next = follow(branch);
+      if (next === null) return result;
+      cursor = next;
+      continue;
+    }
+
+    if (node.kind === "goal") {
+      let goal;
+      try {
+        goal = await evaluateGoal(node, ctx);
+      } catch (err) {
+        result.currentNodeId = node.id;
+        return park(result, "paused", `goal node "${node.id}" ${err.message}`);
+      }
+
+      const branch = goal.met ? "yes" : "no";
+      // Carried so an `exit` further down the "yes" branch that doesn't label
+      // itself still completes the lead as a conversion rather than flattening
+      // it to a generic "completed". An exit that DOES declare an outcome wins:
+      // it is the more specific statement of how this flow ends.
+      if (goal.met) result.goalOutcome = goalOutcomeFor(node);
+
+      // Deliberately not routed through follow(): a "yes" branch with nowhere
+      // to go is still a conversion, and follow()'s implicit exit would record
+      // it as an unlabelled ending.
+      step.branch = branch;
+      const edge = pickEdge(version, node.id, branch);
+      if (!edge) {
+        return finish(
+          result,
+          node,
+          goal.met ? goalOutcomeFor(node) : null,
+          `no outgoing edge from "${node.id}" for branch "${branch}"`
+        );
+      }
+      cursor = edge.to;
+      continue;
+    }
+
+    if (node.kind === "action") {
+      const config = node.config || {};
+
+      // Two gates, in this order and for different reasons.
+      //
+      // The kill switch is first and unconditional: "sending is off" has to
+      // leave the enrollment byte for byte as it was, whatever else may be
+      // wrong with the node, exactly as a message send hitting a closed gate
+      // does. Nothing is written, nothing is advanced, and the lead comes back
+      // round on the next poll.
+      if (!(await ctx.deps.isSendingEnabled())) {
+        result.stop = "gated";
+        result.reason = `sending is off, so action node "${node.id}" did not fire`;
+        return result;
+      }
+
+      // Then the node's own opt-in, which is separate on purpose. This is the
+      // only kind that writes to the world, so publishing a graph containing
+      // one must never be enough to make it fire. Parked rather than skipped:
+      // walking past a write that a later node may depend on, without saying
+      // so, is how a flow ends up quietly half-done.
+      if (config.enabled !== true) {
+        result.currentNodeId = node.id;
+        return park(
+          result,
+          "paused",
+          `action node "${node.id}" is disabled — an action writes to the world, so it never fires until its own config sets enabled: true`
+        );
+      }
+
+      let outcome;
+      try {
+        outcome = await ctx.performAction(node, ctx);
+      } catch (err) {
+        // A failed or timed-out write must not look like a successful one. The
+        // failure is recorded and the lead stops here rather than walking on as
+        // if the write had landed.
+        result.history.push({
+          kind: "action",
+          nodeId: node.id,
+          sentAt: ctx.now,
+          status: "error",
+          error: err.message,
+        });
+        result.currentNodeId = node.id;
+        return park(result, "failed", `action node "${node.id}" failed: ${err.message}`);
+      }
+
+      result.history.push({
+        kind: "action",
+        nodeId: node.id,
+        sentAt: ctx.now,
+        status: "ok",
+        detail: (outcome && outcome.detail) || null,
+      });
+
+      const next = follow(null);
+      if (next === null) return result;
+      // The tick ends here, exactly as it does after a send, and for the same
+      // reason plus a sharper one. The sharper one: a result is committed whole
+      // or not at all, and a later node in this same tick hitting the kill
+      // switch would discard the whole result — including the record of a write
+      // that really did happen, which would then fire a second time next tick.
+      result.stop = "acted";
+      result.currentNodeId = next;
+      result.nextSendAt = ctx.now;
+      return result;
     }
 
     if (node.kind === "source") {
@@ -881,7 +1214,10 @@ async function runWalk(enrollment, campaign, ctx) {
 
     if (node.kind === "exit") {
       const config = node.config || {};
-      return finish(result, node, config.outcome || config.reason || "completed", null);
+      // An exit that labels itself wins. Failing that, a goal met earlier in
+      // this walk names the ending, so a converted lead is recorded as
+      // converted rather than as generically "completed".
+      return finish(result, node, config.outcome || config.reason || result.goalOutcome || "completed", null);
     }
 
     // Unreachable through the model's `kind` enum, but a graph written straight
@@ -937,14 +1273,19 @@ async function noopSender() {
  *   send     async ({ phone, templateId, params, meta, channelId }) => result -
  *            the sender. Defaults to whatsappProvider.sendMessage; in a dry
  *            run it defaults to a no-op that returns {}.
- *   dryRun   boolean - forces the no-op sender when no sender is given and
+ *   performAction async (node, ctx) => { detail } - runs an `action` node's
+ *            outbound call or source write-back. Defaults to the real executor;
+ *            in a dry run it defaults to a no-op that performs nothing and
+ *            reports as much.
+ *   dryRun   boolean - forces the no-op sender and the no-op action runner when
+ *            neither is given, and
  *            never persists the enrollment. The in-memory enrollment is still
  *            advanced exactly as a live tick would advance it, so successive
  *            dry-run calls walk a flow forward across ticks.
  *   hopLimit number - node visits allowed in this tick (default 50).
- *   deps     { resolveSource, MessageEvent, activitySinceLastSend } - the seam
- *            the verify harness substitutes to walk a graph without touching
- *            the real sources.
+ *   deps     { resolveSource, MessageEvent, isSendingEnabled,
+ *            activitySinceLastSend } - the seam the verify harness substitutes
+ *            to walk a graph without touching the real sources.
  *
  * Returns the walk result: { stop, reason, visited[], path[], sends[],
  * history[], currentNodeId, nextSendAt, status, exitOutcome, hops }. `sends`
@@ -962,6 +1303,10 @@ async function walkEnrollment(enrollment, campaign, options = {}) {
     now: resolveNow(options.now),
     dryRun,
     send: options.send || (dryRun ? noopSender : whatsappProvider.sendMessage),
+    // Same seam as `send`, for the same reason: a dry run must not be able to
+    // make an outbound call or write to a source, and the harness needs to be
+    // able to drive the real one deliberately.
+    performAction: options.performAction || (dryRun ? noopActionRunner : performAction),
     hopLimit: Number(options.hopLimit) > 0 ? Number(options.hopLimit) : MAX_HOPS_PER_TICK,
     deps: { ...defaultDeps(), ...(options.deps || {}) },
   };
@@ -1131,6 +1476,12 @@ module.exports = {
   sendSingleMessage,
   walkEnrollment,
   resolveWaitAt,
+  // Exported for the verify harness, which drives the genuine HTTP/write paths
+  // (timeout, non-2xx, success) against a server it starts itself.
+  performAction,
+  splitBranchFor,
+  ACTION_TIMEOUT_MS,
+  GOAL_MET_OUTCOME,
   processDueEnrollments,
   processAutoEnroll,
   startScheduler,

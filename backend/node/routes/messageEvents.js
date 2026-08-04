@@ -276,6 +276,12 @@ router.get("/sends", async (req, res) => {
   const campaignBranch = [
     ...phoneMatch,
     { $unwind: "$history" },
+    // History holds everything that happened to a lead, which since the action
+    // node landed is no longer only sends. This feed is about messages, so an
+    // action entry is excluded rather than surfacing as a send with no
+    // template. Matched on $ne so rows written before `kind` existed (they
+    // carry no kind at all, and were all sends) still come through.
+    { $match: { "history.kind": { $ne: "action" } } },
     {
       $project: {
         _id: 0,

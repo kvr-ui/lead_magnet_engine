@@ -151,7 +151,11 @@ function SendDetail({ row, onClose }) {
                     : data.enrollment?.status === "completed"
                       ? "Finished the flow"
                       : "Not started",
-                  "Messages sent": data.enrollment?.history?.length,
+                  // History records everything that happened to this lead,
+                  // which since the action node landed is no longer only
+                  // sends — so this counts messages rather than entries.
+                  "Messages sent": (data.enrollment?.history || []).filter((h) => (h.kind || "message") === "message")
+                    .length,
                   "Next send": data.enrollment?.nextSendAt ? new Date(data.enrollment.nextSendAt).toLocaleString() : null,
                   Enrolled: data.enrollment?.createdAt ? new Date(data.enrollment.createdAt).toLocaleString() : null,
                 }}

@@ -18,12 +18,13 @@
 // count is asserted to be exactly zero at the end. That is the strongest
 // proof available that this run never reached WATI: not just "no live
 // provider call", but no call to ANY sender at all, real or fake.
+const http = require("node:http");
 const mongoose = require("mongoose");
 
 const Campaign = require("../models/Campaign");
 const CampaignEnrollment = require("../models/CampaignEnrollment");
 const Lead = require("../models/Lead");
-const { walkEnrollment, MAX_HOPS_PER_TICK } = require("../lib/campaignEngine");
+const { walkEnrollment, performAction, MAX_HOPS_PER_TICK, GOAL_MET_OUTCOME } = require("../lib/campaignEngine");
 const { planEnrollment } = require("./migrate-to-graph");
 
 const URI = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/wati_cleanup";
@@ -74,6 +75,37 @@ const CYCLE_EDGES = [
   { id: "e_cyc2_cyc1", from: "n_cyc2", to: "n_cyc1", branch: "yes" },
 ];
 
+// --- graphs for the three handlers task 12 added -------------------------
+//
+// These drive plain in-memory campaign objects rather than persisted ones: the
+// walker only ever reads `name`, `channelId` and `versions[]` off a campaign,
+// and the action cases need a url that isn't known until the throwaway HTTP
+// server below has been given a port. Fewer rows to seed, and none to clean up.
+const SPLIT_NODES = [
+  { id: "n_split", kind: "split", label: "30/70", config: { ratio: 30 } },
+  { id: "n_split_a", kind: "exit", label: "A", config: { outcome: "split_a" } },
+  { id: "n_split_b", kind: "exit", label: "B", config: { outcome: "split_b" } },
+];
+const SPLIT_EDGES = [
+  { id: "e_split_a", from: "n_split", to: "n_split_a", branch: "a" },
+  { id: "e_split_b", from: "n_split", to: "n_split_b", branch: "b" },
+];
+
+const GOAL_NODES = [
+  { id: "n_goal", kind: "goal", label: "Solved 3?", config: { metric: "count", threshold: 3 } },
+  // Deliberately declares no outcome of its own, so this doubles as the proof
+  // that a met goal names the ending rather than it flattening to "completed".
+  { id: "n_goal_yes", kind: "exit", label: "Converted", config: {} },
+  { id: "n_goal_no", kind: "exit", label: "Not yet", config: { outcome: "not_converted" } },
+  // No outgoing edges at all: a met goal here is an implicit exit, and must
+  // still be recorded as a conversion.
+  { id: "n_goal_bare", kind: "goal", label: "Any activity?", config: { metric: "count", threshold: 1 } },
+];
+const GOAL_EDGES = [
+  { id: "e_goal_yes", from: "n_goal", to: "n_goal_yes", branch: "yes" },
+  { id: "e_goal_no", from: "n_goal", to: "n_goal_no", branch: "no" },
+];
+
 const results = [];
 const check = (name, pass, detail) => {
   results.push({ name, pass, detail });
@@ -97,6 +129,18 @@ const countingSender = async () => {
 const ARBITRARY_NOW = new Date("2026-01-01T00:00:00.000Z");
 
 let wipe = async () => {};
+// The throwaway HTTP endpoint the action checks call. Held here so the finally
+// block can shut it down even if a check throws first — a listening server
+// would otherwise keep the process alive after the last assertion.
+let actionServer = null;
+const closeActionServer = async () => {
+  if (!actionServer) return;
+  // The /hang case deliberately leaves a request unanswered, so its socket has
+  // to be destroyed or close() waits for a response that never comes.
+  actionServer.closeAllConnections?.();
+  await new Promise((resolve) => actionServer.close(resolve));
+  actionServer = null;
+};
 
 (async () => {
   await mongoose.connect(URI);
@@ -284,7 +328,347 @@ let wipe = async () => {};
       `action=${migrationPlan.action} currentNodeId=${migrationPlan.stats && migrationPlan.stats.currentNodeId}`
     );
 
-    // --- check 6: zero calls ever reached the injected sender/provider,
+    // --- check 6: split is stable per lead and distributes by ratio -----
+    //
+    // The walker only ever reads name/channelId/versions off a campaign, so
+    // these three graphs are plain objects rather than seeded rows.
+    const inMemoryCampaign = (name, nodes, edges) => ({
+      name,
+      channelId: "",
+      versions: [{ version: 1, nodes, edges, publishedAt: new Date() }],
+      liveVersion: 1,
+    });
+
+    const splitCampaign = inMemoryCampaign("__verify_graph_walk__split__", SPLIT_NODES, SPLIT_EDGES);
+    const walkOnce = (enrollment, camp, options = {}) =>
+      walkEnrollment(enrollment, camp, { now: ARBITRARY_NOW, send: countingSender, dryRun: true, ...options });
+
+    const splitEnrollment = (targetId) => ({
+      campaign: new mongoose.Types.ObjectId(),
+      targetModel: "Lead",
+      targetId,
+      phone: LEAD_PHONE,
+      status: "active",
+      graphVersion: 1,
+      currentNodeId: "n_split",
+      nextSendAt: new Date(),
+      history: [],
+      createdAt: new Date(),
+    });
+
+    const SPLIT_POPULATION = 1000;
+    const splitIds = Array.from({ length: SPLIT_POPULATION }, () => new mongoose.Types.ObjectId());
+
+    const firstPass = [];
+    for (const id of splitIds) firstPass.push((await walkOnce(splitEnrollment(id), splitCampaign)).exitOutcome);
+
+    // Same leads, evaluated again from scratch a day later on fresh enrollment
+    // objects. A branch derived from anything but the targetId — a random draw,
+    // the clock, a counter — would move for at least some of them.
+    let flipped = 0;
+    for (let i = 0; i < splitIds.length; i++) {
+      const again = await walkOnce(splitEnrollment(splitIds[i]), splitCampaign, {
+        now: new Date(ARBITRARY_NOW.getTime() + 24 * 60 * 60 * 1000),
+      });
+      if (again.exitOutcome !== firstPass[i]) flipped++;
+    }
+    check(
+      `every one of ${SPLIT_POPULATION} leads takes the same split branch when re-evaluated (no random or clock input)`,
+      flipped === 0,
+      `flipped=${flipped}/${SPLIT_POPULATION}`
+    );
+
+    const shareA = (firstPass.filter((o) => o === "split_a").length / SPLIT_POPULATION) * 100;
+    check(
+      `split configured at ratio 30 sends ~30% of ${SPLIT_POPULATION} distinct targetIds down branch "a"`,
+      Math.abs(shareA - 30) <= 5,
+      `actual=${shareA.toFixed(1)}% (tolerance ±5 points)`
+    );
+
+    const badSplitCampaign = inMemoryCampaign(
+      "__verify_graph_walk__split_bad__",
+      [{ id: "n_split", kind: "split", label: "unset", config: {} }, ...SPLIT_NODES.slice(1)],
+      SPLIT_EDGES
+    );
+    const badSplit = await walkOnce(splitEnrollment(new mongoose.Types.ObjectId()), badSplitCampaign);
+    check(
+      "split with no ratio parks with a reason instead of inventing a 50/50 experiment",
+      badSplit.stop === "paused" && /ratio/i.test(badSplit.reason || ""),
+      `stop=${badSplit.stop} reason=${badSplit.reason}`
+    );
+
+    // --- check 7: goal counts only post-send activity, at the boundary --
+    //
+    // The goal node reads lib/leadActivity.js's rollup, whose cutoff is the
+    // enrollment's last send (falling back to its creation time when it never
+    // sent). That dep is substituted here so rows can be fabricated either side
+    // of the cutoff without standing up an external activity database — but the
+    // cutoff rule is reproduced exactly as leadActivity computes it, so a row
+    // landing on the wrong side of it is a real miss and not an artefact of the
+    // stand-in.
+    const LAST_SEND = new Date("2026-01-01T00:00:00.000Z");
+    const rollupOver = (rows) => async (enrollment) => {
+      const history = enrollment.history || [];
+      let cutoff = enrollment.createdAt ? new Date(enrollment.createdAt) : new Date(0);
+      for (let i = history.length - 1; i >= 0; i--) {
+        if (history[i] && history[i].status === "sent" && history[i].sentAt) {
+          cutoff = new Date(history[i].sentAt);
+          break;
+        }
+      }
+      const counted = rows.filter((at) => new Date(at) > cutoff);
+      return {
+        configured: true,
+        matched: true,
+        since: cutoff,
+        key: "verify",
+        count: counted.length,
+        correct: counted.length,
+        graded: counted.length,
+      };
+    };
+
+    const goalCampaign = inMemoryCampaign("__verify_graph_walk__goal__", GOAL_NODES, GOAL_EDGES);
+    const goalEnrollment = (overrides = {}) => ({
+      campaign: new mongoose.Types.ObjectId(),
+      targetModel: "Lead",
+      targetId: lead._id,
+      phone: LEAD_PHONE,
+      status: "active",
+      graphVersion: 1,
+      currentNodeId: "n_goal",
+      nextSendAt: new Date(),
+      createdAt: new Date("2025-12-01T00:00:00.000Z"),
+      history: [{ nodeId: "n_msg", templateId: "verify_graph_tpl", sentAt: LAST_SEND, status: "sent" }],
+      ...overrides,
+    });
+
+    const before = (n) => Array.from({ length: n }, (_, i) => new Date(LAST_SEND.getTime() - (i + 1) * 60_000));
+    const after = (n) => Array.from({ length: n }, (_, i) => new Date(LAST_SEND.getTime() + (i + 1) * 60_000));
+
+    // Five rows before the last send and two after it, against a threshold of
+    // three. Counting the pre-send rows would total seven and wrongly convert.
+    const preSendOnly = await walkOnce(goalEnrollment(), goalCampaign, {
+      deps: { activitySinceLastSend: rollupOver([...before(5), ...after(2)]) },
+    });
+    check(
+      "goal ignores activity recorded before the last send (5 before + 2 after, threshold 3 → 'no')",
+      preSendOnly.exitOutcome === "not_converted",
+      `exitOutcome=${preSendOnly.exitOutcome} path=${JSON.stringify(preSendOnly.path)}`
+    );
+
+    const justUnder = await walkOnce(goalEnrollment(), goalCampaign, {
+      deps: { activitySinceLastSend: rollupOver(after(2)) },
+    });
+    check(
+      "goal just under its threshold (2 of 3) takes the 'no' branch",
+      justUnder.exitOutcome === "not_converted",
+      `exitOutcome=${justUnder.exitOutcome}`
+    );
+
+    const atBoundary = await walkOnce(goalEnrollment(), goalCampaign, {
+      deps: { activitySinceLastSend: rollupOver(after(3)) },
+    });
+    check(
+      "goal exactly at its threshold (3 of 3) takes the 'yes' branch and exits with a conversion outcome",
+      atBoundary.exitOutcome === GOAL_MET_OUTCOME &&
+        JSON.stringify(atBoundary.path) === JSON.stringify(["n_goal", "n_goal_yes"]),
+      `exitOutcome=${atBoundary.exitOutcome} (exit node declares none, so the goal names it) path=${JSON.stringify(atBoundary.path)}`
+    );
+
+    const overBoundary = await walkOnce(goalEnrollment(), goalCampaign, {
+      deps: { activitySinceLastSend: rollupOver(after(9)) },
+    });
+    check(
+      "goal over its threshold (9 of 3) also converts",
+      overBoundary.exitOutcome === GOAL_MET_OUTCOME,
+      `exitOutcome=${overBoundary.exitOutcome}`
+    );
+
+    const bareGoal = await walkOnce(goalEnrollment({ currentNodeId: "n_goal_bare" }), goalCampaign, {
+      deps: { activitySinceLastSend: rollupOver(after(1)) },
+    });
+    check(
+      "a met goal with no outgoing edge still records the conversion rather than an unlabelled ending",
+      bareGoal.status === "completed" && bareGoal.exitOutcome === GOAL_MET_OUTCOME,
+      `status=${bareGoal.status} exitOutcome=${bareGoal.exitOutcome}`
+    );
+
+    const noSource = await walkOnce(goalEnrollment(), goalCampaign, {
+      deps: {
+        activitySinceLastSend: async () => ({ configured: false, matched: false, count: 0, correct: 0, graded: 0 }),
+      },
+    });
+    check(
+      "goal with no activity source configured parks with a reason instead of guessing a branch",
+      noSource.stop === "paused" && /activity/i.test(noSource.reason || ""),
+      `stop=${noSource.stop} reason=${noSource.reason}`
+    );
+
+    // --- check 8: the action node --------------------------------------
+    let endpointHits = 0;
+    let lastUrl = null;
+    actionServer = http.createServer((req, res) => {
+      endpointHits += 1;
+      lastUrl = req.url;
+      if (req.url.startsWith("/ok")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end('{"ok":true}');
+        return;
+      }
+      if (req.url.startsWith("/fail")) {
+        res.writeHead(500);
+        res.end("no");
+        return;
+      }
+      // /hang — the request is accepted and deliberately never answered, so the
+      // only thing that can end it is the action's own timeout.
+    });
+    await new Promise((resolve) => actionServer.listen(0, "127.0.0.1", resolve));
+    const base = `http://127.0.0.1:${actionServer.address().port}`;
+
+    const actionCampaign = (config) =>
+      inMemoryCampaign(
+        "__verify_graph_walk__action__",
+        [
+          { id: "n_act", kind: "action", label: "Notify CRM", config },
+          { id: "n_act_exit", kind: "exit", label: "Done", config: { outcome: "acted" } },
+        ],
+        [{ id: "e_act", from: "n_act", to: "n_act_exit" }]
+      );
+
+    const actionEnrollment = () => ({
+      campaign: new mongoose.Types.ObjectId(),
+      targetModel: "Lead",
+      targetId: lead._id,
+      phone: LEAD_PHONE,
+      status: "active",
+      graphVersion: 1,
+      currentNodeId: "n_act",
+      nextSendAt: new Date(),
+      history: [],
+      createdAt: new Date(),
+    });
+
+    // Every action case drives the REAL executor (not a stand-in that merely
+    // claims to time out) against the server above.
+    const walkAction = (config, { sendingEnabled = true } = {}) => {
+      const enrollment = actionEnrollment();
+      const before = JSON.stringify(enrollment);
+      return walkOnce(enrollment, actionCampaign(config), {
+        performAction,
+        deps: { isSendingEnabled: async () => sendingEnabled },
+      }).then((result) => ({ result, enrollment, untouched: JSON.stringify(enrollment) === before }));
+    };
+
+    const hitsBeforeGate = endpointHits;
+    const gated = await walkAction({ enabled: true, mode: "http", method: "POST", url: `${base}/ok` }, { sendingEnabled: false });
+    check(
+      "action with the send kill switch off does not fire and leaves the enrollment completely untouched",
+      gated.result.stop === "gated" && gated.untouched && endpointHits === hitsBeforeGate,
+      `stop=${gated.result.stop} untouched=${gated.untouched} endpointHits=${endpointHits - hitsBeforeGate}`
+    );
+
+    const hitsBeforeDisabled = endpointHits;
+    const disabled = await walkAction({ mode: "http", method: "POST", url: `${base}/ok` });
+    check(
+      "action without an explicit enabled:true never fires, even with the kill switch on",
+      disabled.result.stop === "paused" &&
+        /disabled/i.test(disabled.result.reason || "") &&
+        endpointHits === hitsBeforeDisabled &&
+        disabled.enrollment.currentNodeId === "n_act" &&
+        disabled.enrollment.history.length === 0,
+      `stop=${disabled.result.stop} reason=${disabled.result.reason} endpointHits=${endpointHits - hitsBeforeDisabled}`
+    );
+
+    const hung = await walkAction({ enabled: true, mode: "http", method: "POST", url: `${base}/hang`, timeoutMs: 300 });
+    const hungEntry = hung.enrollment.history[hung.enrollment.history.length - 1];
+    check(
+      "action against an endpoint that never answers times out instead of hanging the tick, and does not advance the lead",
+      hung.result.stop === "failed" &&
+        hung.enrollment.currentNodeId === "n_act" &&
+        hungEntry &&
+        hungEntry.kind === "action" &&
+        hungEntry.status === "error" &&
+        /timed out/i.test(hungEntry.error || ""),
+      `stop=${hung.result.stop} currentNodeId=${hung.enrollment.currentNodeId} error=${hungEntry && hungEntry.error}`
+    );
+
+    const failed = await walkAction({ enabled: true, mode: "http", method: "POST", url: `${base}/fail` });
+    const failedEntry = failed.enrollment.history[failed.enrollment.history.length - 1];
+    check(
+      "action that gets a non-2xx records the failure on history and does NOT advance the lead to the next node",
+      failed.result.stop === "failed" &&
+        failed.enrollment.currentNodeId === "n_act" &&
+        failedEntry &&
+        failedEntry.kind === "action" &&
+        failedEntry.status === "error" &&
+        /500/.test(failedEntry.error || ""),
+      `stop=${failed.result.stop} currentNodeId=${failed.enrollment.currentNodeId} error=${failedEntry && failedEntry.error}`
+    );
+
+    const ok = await walkAction({
+      enabled: true,
+      mode: "http",
+      method: "POST",
+      url: `${base}/ok?phone={{phone}}`,
+      body: { phone: "{{phone}}" },
+    });
+    const okEntry = ok.enrollment.history[ok.enrollment.history.length - 1];
+    check(
+      "action that succeeds records the outcome on history, follows its edge, and interpolates canonical lead values",
+      ok.result.stop === "acted" &&
+        ok.enrollment.currentNodeId === "n_act_exit" &&
+        okEntry &&
+        okEntry.kind === "action" &&
+        okEntry.status === "ok" &&
+        /200/.test(okEntry.detail || "") &&
+        String(lastUrl).includes(LEAD_PHONE),
+      `stop=${ok.result.stop} currentNodeId=${ok.enrollment.currentNodeId} detail=${okEntry && okEntry.detail} url=${lastUrl}`
+    );
+
+    await closeActionServer();
+
+    // --- check 9: the action node's other mode, writing back to the source
+    const writeBack = await walkAction({
+      enabled: true,
+      mode: "source",
+      // A raw field on the source's own documents, not a canonical key: this
+      // writes into the lead magnet's collection and has to speak its
+      // vocabulary. The value still interpolates canonical keys.
+      field: "leadMagnet",
+      value: "written-by-action-{{phone}}",
+    });
+    const writtenLead = await Lead.findById(lead._id).lean();
+    const writeEntry = writeBack.enrollment.history[writeBack.enrollment.history.length - 1];
+    check(
+      "action in source write-back mode writes the interpolated value onto the source document and follows its edge",
+      writeBack.result.stop === "acted" &&
+        writeBack.enrollment.currentNodeId === "n_act_exit" &&
+        writtenLead.leadMagnet === `written-by-action-${LEAD_PHONE}` &&
+        writeEntry &&
+        writeEntry.kind === "action" &&
+        writeEntry.status === "ok",
+      `stop=${writeBack.result.stop} leadMagnet=${writtenLead.leadMagnet} detail=${writeEntry && writeEntry.detail}`
+    );
+
+    // A write that matches nothing is a failed write, not a silent success —
+    // the lead must not walk on as though the source had been updated.
+    const missingTarget = await (async () => {
+      const enrollment = { ...actionEnrollment(), targetId: new mongoose.Types.ObjectId() };
+      const result = await walkOnce(enrollment, actionCampaign({ enabled: true, mode: "source", field: "leadMagnet", value: "x" }), {
+        performAction,
+        deps: { isSendingEnabled: async () => true },
+      });
+      return { result, enrollment };
+    })();
+    check(
+      "action write-back that matches no source document fails and does not advance the lead",
+      missingTarget.result.stop === "failed" && missingTarget.enrollment.currentNodeId === "n_act",
+      `stop=${missingTarget.result.stop} currentNodeId=${missingTarget.enrollment.currentNodeId} reason=${missingTarget.result.reason}`
+    );
+
+    // --- check 10: zero calls ever reached the injected sender/provider,
     // across every scenario above, including the hop-limit scenario -------
     check(
       "zero calls reached the injected sender/provider across the entire run, including the hop-limit scenario",
@@ -292,6 +676,7 @@ let wipe = async () => {};
       `sendCalls=${sendCalls}`
     );
   } finally {
+    await closeActionServer();
     await wipe();
   }
 
@@ -302,6 +687,7 @@ let wipe = async () => {};
 })().catch(async (e) => {
   console.error(e);
   try {
+    await closeActionServer();
     await wipe();
   } catch (cleanupErr) {
     console.error("cleanup also failed:", cleanupErr);
