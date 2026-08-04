@@ -283,6 +283,10 @@ router.get("/sends", async (req, res) => {
         enrollmentId: "$_id",
         campaignId: "$campaign",
         nodeId: "$history.nodeId",
+        // Carried so each row's node can be named against the exact graph
+        // version its enrollment is pinned to, rather than against whatever
+        // the campaign's draft happens to say today.
+        graphVersion: "$graphVersion",
         phone: "$phone",
         templateId: "$history.templateId",
         sentAt: "$history.sentAt",
@@ -348,12 +352,32 @@ router.get("/sends", async (req, res) => {
     wamids.length ? groupByField({ providerMessageId: { $in: wamids } }, "providerMessageId") : new Map(),
     enrollmentIds.length ? groupByField({ enrollment: { $in: enrollmentIds } }, "enrollment") : new Map(),
     directIds.length ? groupByField({ directMessage: { $in: directIds } }, "directMessage") : new Map(),
+    // draft/versions come along so a row can be named by its node's label. A
+    // graph has no step numbers to count off, so "which send was this" can
+    // only be answered by resolving nodeId against the graph the enrollment
+    // walked. Resolved here rather than in the browser: the client is sent the
+    // finished label, never the graphs.
     Campaign.find({ _id: { $in: rows.filter((r) => r.campaignId).map((r) => r.campaignId) } })
-      .select("name")
+      .select("name draft versions")
       .lean(),
   ]);
 
   const campaignName = new Map(campaigns.map((c) => [String(c._id), c.name]));
+  const campaignById = new Map(campaigns.map((c) => [String(c._id), c]));
+
+  // One node index per (campaign, graphVersion) pair actually present on this
+  // page — a page of 50 sends is typically a handful of pairs, so this is far
+  // cheaper than rebuilding an index per row.
+  const nodeIndexes = new Map();
+  function labelFor(row) {
+    if (row.kind !== "campaign" || !row.nodeId) return null;
+    const key = `${row.campaignId}:${row.graphVersion}`;
+    if (!nodeIndexes.has(key)) {
+      nodeIndexes.set(key, graphNodeIndex(campaignById.get(String(row.campaignId)), row.graphVersion));
+    }
+    const info = describeNode(nodeIndexes.get(key), row.nodeId);
+    return info ? info.label : null;
+  }
 
   res.json({
     total,
@@ -367,6 +391,9 @@ router.get("/sends", async (req, res) => {
       // which enrollment it was, since one enrollment holds several sends.
       _id: r.kind === "campaign" ? `${r.enrollmentId}-${r.nodeId}` : String(r.directMessageId),
       campaignName: r.campaignId ? campaignName.get(String(r.campaignId)) || null : null,
+      // Null when the node has since been deleted from the graph, or for a
+      // manual send, which belongs to no graph at all.
+      label: labelFor(r),
       delivery: r.providerMessageId
         ? byWamid.get(r.providerMessageId) || {}
         : r.enrollmentId

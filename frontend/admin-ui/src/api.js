@@ -86,6 +86,15 @@ export function deleteCampaign(id) {
   return sendJSON("DELETE", `/api/campaigns/${id}`);
 }
 
+// Every source a campaign can target, as the backend reports it: the built-in
+// ones plus every connected, active Data Source. The picker renders this
+// verbatim — there is deliberately no frontend-side list of sources to fall
+// back on, because that list is exactly what stopped a newly connected
+// lead-magnet database from being selectable without a code change.
+export function fetchCampaignSources() {
+  return getJSON("/api/campaigns/meta/sources");
+}
+
 export function fetchFilterFields(source) {
   return getJSON(`/api/campaigns/meta/fields?source=${encodeURIComponent(source)}`);
 }
