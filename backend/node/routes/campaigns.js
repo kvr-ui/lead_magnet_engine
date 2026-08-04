@@ -285,6 +285,32 @@ router.post("/campaigns", async (req, res) => {
   }
 });
 
+/**
+ * The source ids a campaign reads from, in the order its graph declares them.
+ *
+ * Taken from the live published version when there is one - that is the graph
+ * enrollments are actually walking - and from the draft otherwise, so a
+ * campaign that has been built but not yet published still names its source.
+ *
+ * `targetModel` is the last resort. It was the campaign-level source field
+ * before campaigns became graphs; it is no longer part of the schema, so it
+ * only appears on documents written before that change, and only survives here
+ * because these rows are read with .lean().
+ */
+function sourceIdsOf(campaign) {
+  const live =
+    campaign.liveVersion === null || campaign.liveVersion === undefined
+      ? null
+      : (campaign.versions || []).find((v) => v && v.version === campaign.liveVersion);
+  const graph = live || campaign.draft || {};
+  const ids = (graph.nodes || [])
+    .filter((n) => n && n.kind === "source" && n.config && n.config.sourceId)
+    .map((n) => n.config.sourceId);
+  const unique = [...new Set(ids)];
+  if (unique.length) return unique;
+  return campaign.targetModel ? [campaign.targetModel] : [];
+}
+
 // GET /api/campaigns - list all campaigns with enrollment counts.
 router.get("/campaigns", async (_req, res) => {
   const campaigns = await Campaign.find().sort({ createdAt: -1 }).lean();
@@ -324,6 +350,12 @@ router.get("/campaigns", async (_req, res) => {
         ...campaign,
         nodeCount: ((c.draft && c.draft.nodes) || []).length,
         versionCount: (versions || []).length,
+        // Which sources feed this campaign, read off its graph. A campaign no
+        // longer has a single `targetModel` field - the source moved onto the
+        // graph's source node(s) when campaigns became graphs, and a graph may
+        // hold more than one. Reported here so the list doesn't have to fetch
+        // every campaign's whole graph to name its source.
+        sourceIds: sourceIdsOf(c),
         enrollments: byCampaign[String(c._id)] || {},
         delivery: deliveryByCampaign[String(c._id)] || {},
       };

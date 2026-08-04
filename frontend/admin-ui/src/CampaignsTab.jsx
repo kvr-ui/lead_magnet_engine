@@ -28,6 +28,22 @@ function humanizeKey(key) {
 }
 
 /**
+ * What to call a campaign's source in the list.
+ *
+ * `sourceIds` is what the backend reads off the campaign's graph — a campaign
+ * has no single `targetModel` field any more, and a graph may feed from more
+ * than one source, so this is a list. `targetModel` is only consulted for rows
+ * written before campaigns became graphs. A campaign whose graph has no source
+ * node yet says so rather than rendering an empty cell that reads as a bug.
+ */
+function campaignSourceLabel(campaign, sourceLabels) {
+  const ids = campaign.sourceIds && campaign.sourceIds.length ? campaign.sourceIds : [campaign.targetModel];
+  const named = ids.filter(Boolean).map((id) => sourceLabels[id] || id);
+  if (!named.length) return <span className="muted">No source yet</span>;
+  return named.join(", ");
+}
+
+/**
  * Preview/segment table columns for *any* source, built from what the backend
  * reports about that source rather than from a per-source list written here.
  *
@@ -252,21 +268,30 @@ function CampaignDetail({ campaign, sourceLabels, sources, onClose, onChanged })
   const [membersError, setMembersError] = useState(null);
 
   // The canonical field map feeding this campaign's preview table: the map on
-  // the source node that reads the campaign's own target source, or failing an
-  // exact match the first source node in the graph (a graph may hold several,
-  // one per lead magnet). Empty until the draft has loaded, which just means
-  // the table starts as discovered-fields-only and gains its canonical columns
-  // a moment later.
-  const canonicalMap = useMemo(() => {
+  // The source node this panel reads through, and with it both the source id
+  // and the canonical field map.
+  //
+  // The graph is the source of truth. A campaign has no `targetModel` field of
+  // its own any more — the source moved onto the source node when campaigns
+  // became graphs — so it is consulted only as a fallback, for rows written
+  // before that change. A graph may hold several source nodes (one per lead
+  // magnet); this panel shows the first, matching the legacy field when one is
+  // there to match.
+  const owningSourceNode = useMemo(() => {
     const sourceNodes = ((fullCampaign && fullCampaign.draft && fullCampaign.draft.nodes) || []).filter(
       (n) => n.kind === "source"
     );
-    const owning =
-      sourceNodes.find((n) => n.config && n.config.sourceId === campaign.targetModel) || sourceNodes[0];
-    return (owning && owning.config && owning.config.map) || {};
+    return sourceNodes.find((n) => n.config && n.config.sourceId === campaign.targetModel) || sourceNodes[0] || null;
   }, [fullCampaign, campaign.targetModel]);
 
-  const columns = useSourceColumns(campaign.targetModel, canonicalMap);
+  const sourceId =
+    (owningSourceNode && owningSourceNode.config && owningSourceNode.config.sourceId) ||
+    (campaign.sourceIds && campaign.sourceIds[0]) ||
+    campaign.targetModel ||
+    "";
+  const canonicalMap = (owningSourceNode && owningSourceNode.config && owningSourceNode.config.map) || {};
+
+  const columns = useSourceColumns(sourceId, canonicalMap);
 
   // nodeId -> label for each published version, so an enrollment row can name
   // the node it is parked on. Keyed by version as well as by id because an
@@ -304,10 +329,11 @@ function CampaignDetail({ campaign, sourceLabels, sources, onClose, onChanged })
 
   useEffect(() => {
     setMembersError(null);
-    fetchSegmentMembers(campaign.targetModel, filter, membersPage)
+    if (!sourceId) return;
+    fetchSegmentMembers(sourceId, filter, membersPage)
       .then(setMembers)
       .catch((err) => setMembersError(err.message));
-  }, [campaign.targetModel, filterKey, membersPage]);
+  }, [sourceId, filterKey, membersPage]);
 
   async function handlePreview() {
     setError(null);
@@ -326,7 +352,7 @@ function CampaignDetail({ campaign, sourceLabels, sources, onClose, onChanged })
   async function handleSend() {
     if (!preview) return;
     const confirmed = window.confirm(
-      `Send "${campaign.name}" to ${preview.willEnroll} ${sourceLabels[campaign.targetModel] || campaign.targetModel}?\n\n` +
+      `Send "${campaign.name}" to ${preview.willEnroll} ${sourceLabels[sourceId] || sourceId || "leads"}?\n\n` +
         `${preview.matched} matched, ${preview.alreadyEnrolled} already enrolled, ` +
         `${preview.skippedNoPhone + preview.skippedBadPhone} skipped (no/invalid phone).` +
         (armAuto
@@ -387,7 +413,7 @@ function CampaignDetail({ campaign, sourceLabels, sources, onClose, onChanged })
         <h3>
           {campaign.name}{" "}
           <span className="muted">
-            — {sourceLabels[campaign.targetModel] || campaign.targetModel} · sends from{" "}
+            — {sourceLabels[sourceId] || sourceId || "no source yet"} · sends from{" "}
             {campaign.channelId ? campaign.channelId : "Default channel"}
           </span>
         </h3>
@@ -461,7 +487,7 @@ function CampaignDetail({ campaign, sourceLabels, sources, onClose, onChanged })
       {conditions.map((c, i) => (
         <FilterCondition
           key={i}
-          source={campaign.targetModel}
+          source={sourceId}
           condition={c}
           onChange={(next) => setConditions(conditions.map((cc, idx) => (idx === i ? next : cc)))}
           onRemove={() => setConditions(conditions.filter((_, idx) => idx !== i))}
@@ -670,7 +696,9 @@ export default function CampaignsTab({ focusCampaignId = null }) {
                 {campaigns.map((c) => (
                   <tr key={c._id} className="clickable-row" onClick={() => setSelectedId(c._id)}>
                     <td>{c.name}</td>
-                    <td>{sourceLabels[c.targetModel] || c.targetModel}</td>
+                    {/* Read off the graph's source node(s) by the backend —
+                        a campaign has no single targetModel field any more. */}
+                    <td>{campaignSourceLabel(c, sourceLabels)}</td>
                     {/* The draft graph's size, as counted by the backend
                         (GET /api/campaigns). There is no steps[] to measure
                         any more, and counting nodes here would mean shipping
