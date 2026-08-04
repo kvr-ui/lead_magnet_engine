@@ -52,7 +52,7 @@ const NODE_KINDS = ["source", "filter", "message", "wait", "condition", "split",
  *
  * `source` - { sourceId, filter, map: { phone, name, email, ... } }
  *   sourceId identifies the source feeding this branch of the graph: a built-in
- *   "Contact" / "Lead" / "AdMagnetStudent", or a connected Data Source as
+ *   built-in "Contact" / "Lead", or a connected Data Source as
  *   "datasource:<id>". filter is the same Mongo-ish filter shape already used
  *   by autoEnrollFilter and matchTargets (plain equality, { $in: [...] }, or a
  *   single bounded numeric comparison - see isSafeValue in lib/sourceData.js).

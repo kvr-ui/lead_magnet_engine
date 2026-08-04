@@ -1,9 +1,9 @@
 const Contact = require("../models/Contact");
 const Lead = require("../models/Lead");
-const { getAdMagnetConnection } = require("../db");
 
 // Field names never surfaced to the UI regardless of source: mongoose
-// internals, dynamic Map sub-paths, and (for AdMagnetStudent) OTP secrets.
+// internals, dynamic Map sub-paths, and the OTP secrets CA Guru's user
+// documents carry.
 const ALWAYS_EXCLUDED = new Set(["_id", "__v", "phoneOtp", "phoneOtpExpires"]);
 
 const DYNAMIC_PREFIX = "datasource:";
@@ -15,9 +15,8 @@ const DYNAMIC_PREFIX = "datasource:";
 // copy of this pair — the copy that made a newly connected lead-magnet
 // database unselectable until someone edited the frontend.
 //
-// "AdMagnetStudent" is deliberately absent: getSourceFields() still reads it so
-// campaigns enrolled against it keep working, but it is a legacy hardcoded
-// source and must not be offered as the target of a *new* campaign.
+// Every other source is a DataSourceConnection the admin connected, listed
+// alongside these by GET /api/campaigns/meta/sources.
 const BUILT_IN_SOURCES = [
   { value: "Contact", label: "Zoho Contacts" },
   { value: "Lead", label: "Lead Magnet Leads" },
@@ -35,8 +34,8 @@ function schemaFieldKeys(Model) {
 }
 
 // Discovers field names on a schemaless collection by sampling documents —
-// shared by AdMagnetStudent (the one pre-existing external source) and every
-// user-connected DataSourceConnection.
+// every user-connected DataSourceConnection goes through this, since none of
+// them has a schema here to read the field list off.
 async function sampleFieldKeys(collection, { excluded = ALWAYS_EXCLUDED, sampleSize = 300 } = {}) {
   const [result] = await collection
     .aggregate([
@@ -52,22 +51,9 @@ async function sampleFieldKeys(collection, { excluded = ALWAYS_EXCLUDED, sampleS
 
 // Cached briefly since this is called on every filter validation, not just
 // when the picker loads.
-let adMagnetCache = { keys: null, at: 0 };
 const CACHE_TTL_MS = 60_000;
 
-async function adMagnetStudentFieldKeys() {
-  if (adMagnetCache.keys && Date.now() - adMagnetCache.at < CACHE_TTL_MS) {
-    return adMagnetCache.keys;
-  }
-  const conn = getAdMagnetConnection();
-  if (!conn) return [];
-
-  const keys = await sampleFieldKeys(conn.db.collection("users"));
-  adMagnetCache = { keys, at: Date.now() };
-  return keys;
-}
-
-// One field-keys cache entry per connected data source, same TTL as above.
+// One field-keys cache entry per connected data source.
 const dynamicCache = new Map(); // id -> { keys, at }
 
 async function dynamicSourceFieldKeys(dataSourceId) {
@@ -100,14 +86,13 @@ async function dynamicSourceFieldKeys(dataSourceId) {
 // Returns [{ key, label }] for every real field on the given source, or null
 // for an unknown source. Used both to populate field-picker dropdowns and as
 // the whitelist for validating user-supplied filter keys before they reach a
-// MongoDB query. `source` is either a fixed name ("Contact"/"Lead"/
-// "AdMagnetStudent") or "datasource:<DataSourceConnection id>" for a
-// user-connected external collection.
+// MongoDB query. `source` is either a built-in name ("Contact"/"Lead") or
+// "datasource:<DataSourceConnection id>" for a user-connected external
+// collection.
 async function getSourceFields(source) {
   let keys;
   if (source === "Contact") keys = schemaFieldKeys(Contact);
   else if (source === "Lead") keys = schemaFieldKeys(Lead);
-  else if (source === "AdMagnetStudent") keys = await adMagnetStudentFieldKeys();
   else if (source && source.startsWith(DYNAMIC_PREFIX)) {
     keys = await dynamicSourceFieldKeys(source.slice(DYNAMIC_PREFIX.length));
     if (!keys) return null;

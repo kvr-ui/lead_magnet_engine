@@ -72,7 +72,6 @@ async function distinctValues(source, field) {
 const MEMBER_PROJECTIONS = {
   Contact: "name phone caStatus city attempt potential status leadSource ownerName",
   Lead: "name phone email leadMagnet",
-  AdMagnetStudent: { name: 1, email: 1, phoneNumber: 1, city: 1, caLevel: 1, attemptGiven: 1 },
 };
 
 // Paginated, actual matching documents for a source + filter — powers the
@@ -170,7 +169,7 @@ router.get("/campaigns/meta/sources", async (_req, res) => {
   });
 });
 
-// GET /api/campaigns/meta/fields?source=Contact|Lead|AdMagnetStudent
+// GET /api/campaigns/meta/fields?source=Contact|Lead|datasource:<id>
 router.get("/campaigns/meta/fields", async (req, res) => {
   const fields = await getSourceFields(req.query.source);
   if (!fields) return res.status(400).json({ error: `Unknown source "${req.query.source}"` });

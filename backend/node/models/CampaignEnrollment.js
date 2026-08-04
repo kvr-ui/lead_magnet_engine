@@ -1,7 +1,12 @@
 const { Schema, model } = require("mongoose");
 const { DYNAMIC_PREFIX } = require("../lib/sourceFields");
 
-const STATIC_TARGET_MODELS = ["Contact", "Lead", "AdMagnetStudent"];
+// "AdMagnetStudent" was removed when CA Guru stopped being a code-level
+// source and became an ordinary DataSourceConnection. New enrollments must
+// name a real source; historical rows that still carry the old string are
+// read through the documented compatibility shim in lib/sourceResolver.js,
+// which is a read path and does not go through this validator.
+const STATIC_TARGET_MODELS = ["Contact", "Lead"];
 const isValidTargetModel = (v) => STATIC_TARGET_MODELS.includes(v) || v.startsWith(DYNAMIC_PREFIX);
 
 /**
