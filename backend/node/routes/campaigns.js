@@ -5,7 +5,8 @@ const MessageEvent = require("../models/MessageEvent");
 const { sendSingleMessage } = require("../lib/campaignEngine");
 const { previewCampaignTargets, enrollCampaignTargets } = require("../lib/campaignTargets");
 const whatsappProvider = require("../lib/whatsappProvider");
-const { getSourceFields, DYNAMIC_PREFIX, DOCUMENT_PROJECTION } = require("../lib/sourceFields");
+const DataSourceConnection = require("../models/DataSourceConnection");
+const { getSourceFields, BUILT_IN_SOURCES, DYNAMIC_PREFIX, DOCUMENT_PROJECTION } = require("../lib/sourceFields");
 const { getSourceHandle, validateFilter } = require("../lib/sourceData");
 const { asyncRouter } = require("../lib/asyncRouter");
 
@@ -148,6 +149,25 @@ router.get("/campaigns/meta/channels", async (_req, res) => {
   const connected = await whatsappProvider.isConfigured();
   const channels = connected ? await whatsappProvider.getChannels() : [];
   res.json({ channels, connected });
+});
+
+// GET /api/campaigns/meta/sources — every source a campaign can target right
+// now: the built-in ones plus every Data Source an admin has connected and
+// left active, each with the label it was named on the Data Sources tab.
+//
+// This exists so the campaign builder's source picker renders what the backend
+// reports rather than a literal list compiled into the frontend. Connecting a
+// new lead-magnet database is meant to be pure configuration; a hardcoded
+// picker made it a code change, which is the whole reason this endpoint is
+// here rather than the two-item array it replaced.
+router.get("/campaigns/meta/sources", async (_req, res) => {
+  const connected = await DataSourceConnection.find({ active: true }).select("label").sort({ label: 1 }).lean();
+  res.json({
+    sources: [
+      ...BUILT_IN_SOURCES,
+      ...connected.map((ds) => ({ value: `${DYNAMIC_PREFIX}${ds._id}`, label: ds.label })),
+    ],
+  });
 });
 
 // GET /api/campaigns/meta/fields?source=Contact|Lead|AdMagnetStudent

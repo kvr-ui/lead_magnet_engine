@@ -8,6 +8,21 @@ const ALWAYS_EXCLUDED = new Set(["_id", "__v", "phoneOtp", "phoneOtpExpires"]);
 
 const DYNAMIC_PREFIX = "datasource:";
 
+// The built-in, code-level sources a campaign may target: the ones
+// getSourceFields() answers for by name rather than by DataSourceConnection
+// lookup. Exported so the API can *report* the selectable source list and the
+// admin UI can render whatever it is told, instead of keeping its own literal
+// copy of this pair — the copy that made a newly connected lead-magnet
+// database unselectable until someone edited the frontend.
+//
+// "AdMagnetStudent" is deliberately absent: getSourceFields() still reads it so
+// campaigns enrolled against it keep working, but it is a legacy hardcoded
+// source and must not be offered as the target of a *new* campaign.
+const BUILT_IN_SOURCES = [
+  { value: "Contact", label: "Zoho Contacts" },
+  { value: "Lead", label: "Lead Magnet Leads" },
+];
+
 function humanize(key) {
   const spaced = key.replace(/([a-z0-9])([A-Z])/g, "$1 $2");
   return spaced.charAt(0).toUpperCase() + spaced.slice(1);
@@ -110,4 +125,12 @@ const DOCUMENT_PROJECTION = Object.fromEntries(
   [...ALWAYS_EXCLUDED].filter((key) => key !== "_id").map((key) => [key, 0])
 );
 
-module.exports = { getSourceFields, sampleFieldKeys, humanize, ALWAYS_EXCLUDED, DYNAMIC_PREFIX, DOCUMENT_PROJECTION };
+module.exports = {
+  getSourceFields,
+  sampleFieldKeys,
+  humanize,
+  ALWAYS_EXCLUDED,
+  BUILT_IN_SOURCES,
+  DYNAMIC_PREFIX,
+  DOCUMENT_PROJECTION,
+};
