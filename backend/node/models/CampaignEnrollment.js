@@ -16,14 +16,35 @@ const isValidTargetModel = (v) => STATIC_TARGET_MODELS.includes(v) || v.startsWi
  */
 const historyEntrySchema = new Schema(
   {
-    // Which graph node produced this send - the graph-era replacement for the
+    // Which graph node produced this entry - the graph-era replacement for the
     // old stepIndex. A node id rather than a position, so that reordering or
     // re-publishing a flow can't retroactively relabel what was already sent.
     nodeId: { type: String, required: true },
-    templateId: { type: String, required: true },
+    // What happened, not just where. History used to hold sends and nothing
+    // else; an `action` node's outbound call or source write-back is also
+    // something this lead had done to them, and it belongs in the same ordered
+    // record rather than in a second log beside it. Defaulted to "message" so
+    // every row written before actions existed reads back correctly, and read
+    // by anything that means *sends* specifically (GET /api/sends) rather than
+    // "everything that happened".
+    kind: { type: String, enum: ["message", "action"], default: "message" },
+    // Required for a message - a send with no template is not a send - and
+    // meaningless for an action, which references no template at all.
+    templateId: {
+      type: String,
+      required: function () {
+        return this.kind !== "action";
+      },
+    },
     sentAt: { type: Date, required: true },
-    status: { type: String, enum: ["sent", "error"], required: true },
+    // "sent" and "error" are the message vocabulary; an action reports "ok" or
+    // "error". Kept in one enum rather than split per kind so the whole history
+    // is still one queryable shape.
+    status: { type: String, enum: ["sent", "error", "ok"], required: true },
     error: { type: String },
+    // Whatever the entry needs to be debuggable later: for an action, the
+    // status code the endpoint returned or the field that was written.
+    detail: { type: String },
     // The provider's ids for this message, kept so inbound webhook events
     // (delivered / read / replied / failed) can be tied back to the exact
     // send they belong to rather than guessed at by phone number.
