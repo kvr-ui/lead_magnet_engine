@@ -112,6 +112,18 @@ export function fetchEnrollments(id, status = "", page = 1) {
   return getJSON(`/api/campaigns/${id}/enrollments?${params.toString()}`);
 }
 
+// POST /api/campaigns/:id/publish - snapshot the campaign's current draft as
+// a new version and point liveVersion at it.
+export function publishCampaign(id) {
+  return sendJSON("POST", `/api/campaigns/${id}/publish`);
+}
+
+// GET /api/campaigns/:id/versions - publish history (counts only; the full
+// nodes/edges of a version come off GET /api/campaigns/:id).
+export function fetchCampaignVersions(id) {
+  return getJSON(`/api/campaigns/${id}/versions`);
+}
+
 // --- WhatsApp message tracking --------------------------------------
 // Delivery state reported back by the WATI webhook. Separate from a
 // campaign's enrollment counts, which only say how far the drip got — not
