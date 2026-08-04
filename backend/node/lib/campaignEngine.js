@@ -1,10 +1,10 @@
 const Campaign = require("../models/Campaign");
 const CampaignEnrollment = require("../models/CampaignEnrollment");
 const DirectMessage = require("../models/DirectMessage");
-const OptOut = require("../models/OptOut");
 const { cleanPhone } = require("./phone");
 const whatsappProvider = require("./whatsappProvider");
 const { resolveSource } = require("./sourceResolver");
+const { enrollCampaignTargets } = require("./campaignTargets");
 const { isSendingEnabled } = require("./sendingSwitch");
 
 // How many due enrollments to send per poll tick, and the gap between sends —
@@ -20,111 +20,6 @@ const AUTO_ENROLL_INTERVAL_MS = parseInt(process.env.CAMPAIGN_AUTO_ENROLL_INTERV
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// Shared by previewTargets (read-only) and enrollTargets (writes): finds
-// everything matching `filter`, cleans phone numbers, excludes anyone who has
-// opted out, and checks which of what's left is already enrolled in this
-// campaign.
-async function matchTargets(campaign, filter) {
-  const source = await resolveSource(campaign.targetModel);
-  const targets = await source.find(filter || {});
-  const matched = targets.length;
-
-  let skippedNoPhone = 0;
-  let skippedBadPhone = 0;
-  const cleaned = [];
-  for (const t of targets) {
-    if (!t.phone) {
-      skippedNoPhone++;
-      continue;
-    }
-    const phone = cleanPhone(t.phone);
-    if (!phone) {
-      skippedBadPhone++;
-      continue;
-    }
-    cleaned.push({ _id: t._id, phone });
-  }
-
-  // Opt-out is checked before the already-enrolled check, and against every
-  // campaign's history at once — it's a global, per-phone concern (see
-  // models/OptOut.js), not something scoped to this one campaign. Filtering
-  // here, ahead of enrollTargets' bulkWrite, is what guarantees an opted-out
-  // phone is never (re-)enrolled, whatever filter a campaign is run with.
-  const optedOutPhones = new Set(
-    (
-      await OptOut.find({ phone: { $in: cleaned.map((c) => c.phone) } })
-        .select("phone")
-        .lean()
-    ).map((o) => o.phone)
-  );
-  const skippedOptedOut = cleaned.filter((c) => optedOutPhones.has(c.phone)).length;
-  const eligible = cleaned.filter((c) => !optedOutPhones.has(c.phone));
-
-  const existing = await CampaignEnrollment.find({
-    campaign: campaign._id,
-    targetModel: campaign.targetModel,
-    targetId: { $in: eligible.map((c) => c._id) },
-  })
-    .select("targetId")
-    .lean();
-  const existingIds = new Set(existing.map((e) => String(e.targetId)));
-  const willEnroll = eligible.filter((c) => !existingIds.has(String(c._id))).length;
-
-  return {
-    matched,
-    skippedNoPhone,
-    skippedBadPhone,
-    skippedOptedOut,
-    alreadyEnrolled: eligible.length - willEnroll,
-    willEnroll,
-    cleaned: eligible, // internal — enrollTargets uses this to build write ops
-  };
-}
-
-// Read-only: same matching/counting as enrollTargets, no writes. Powers the
-// UI's preview step before the actual "Send Campaign" confirm.
-async function previewTargets(campaign, filter) {
-  const { cleaned, ...counts } = await matchTargets(campaign, filter);
-  return counts;
-}
-
-// Bulk-enroll every target matching `filter` into `campaign`. Re-running with
-// a broader filter is safe — already-enrolled targets are skipped, not restarted.
-async function enrollTargets(campaign, filter) {
-  const { cleaned, ...counts } = await matchTargets(campaign, filter);
-
-  const nextSendAt = new Date();
-
-  const ops = cleaned.map((t) => ({
-    updateOne: {
-      filter: { campaign: campaign._id, targetModel: campaign.targetModel, targetId: t._id },
-      update: {
-        $setOnInsert: {
-          campaign: campaign._id,
-          targetModel: campaign.targetModel,
-          targetId: t._id,
-          phone: t.phone,
-          status: "active",
-          currentStepIndex: 0,
-          nextSendAt,
-          history: [],
-        },
-      },
-      upsert: true,
-    },
-  }));
-
-  if (!ops.length) return { ...counts, enrolled: 0 };
-
-  const CHUNK = 1000;
-  let upserted = 0;
-  for (let i = 0; i < ops.length; i += CHUNK) {
-    const res = await CampaignEnrollment.bulkWrite(ops.slice(i, i + CHUNK), { ordered: false });
-    upserted += res.upsertedCount || 0;
-  }
-  return { ...counts, enrolled: upserted };
 }
 
 // The provider echoes ids for the message it just accepted, under one of
@@ -302,8 +197,9 @@ async function processDueEnrollments() {
 // a created-after-X watermark would never see. The cost is one projected find
 // over the source per armed campaign per tick.
 //
-// Safe to re-run: enrollTargets upserts on (campaign, targetModel, targetId),
-// so already-enrolled targets are skipped rather than restarted at step 0.
+// Safe to re-run: the enrol write upserts on (campaign, targetModel, targetId),
+// so already-enrolled targets are skipped rather than restarted at the entry
+// node of the graph.
 async function processAutoEnroll() {
   // Gated on the same kill switch as sending. Enrolling isn't sending, but
   // quietly stacking up thousands of queued leads while the admin believes
@@ -317,7 +213,12 @@ async function processAutoEnroll() {
   for (const campaign of campaigns) {
     campaign.lastAutoEnrollAt = new Date();
     try {
-      const result = await enrollTargets(campaign, campaign.autoEnrollFilter || {});
+      // The segment lives on the published graph's source nodes now, each
+      // carrying its own filter, so a rescan re-runs the graph rather than one
+      // stored filter. campaign.autoEnrollFilter is the record of what /enroll
+      // previewed and confirmed when auto-enrol was armed, and the marker that
+      // it is armed at all; it is no longer the query itself.
+      const result = await enrollCampaignTargets(campaign);
       enrolled += result.enrolled;
       campaign.lastAutoEnrollCount = result.enrolled;
       campaign.lastAutoEnrollError = null;
@@ -367,10 +268,10 @@ function startScheduler() {
 
 // The read side (showing a lead's details) no longer goes through this module:
 // loading the target document from whichever source the campaign points at is
-// lib/sourceResolver.js's job, and callers reach for it directly.
+// lib/sourceResolver.js's job, and callers reach for it directly. Deciding who
+// enters a campaign, and on which node, is lib/campaignTargets.js's; this
+// module is left owning sending and the two schedulers.
 module.exports = {
-  enrollTargets,
-  previewTargets,
   sendSingleMessage,
   processDueEnrollments,
   processAutoEnroll,
