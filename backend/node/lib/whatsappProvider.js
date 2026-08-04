@@ -14,6 +14,28 @@ const { isSendingEnabled, sendingDisabledError } = require("./sendingSwitch");
 
 const NOT_CONNECTED = "No WhatsApp provider connected — connect one from the Integrations tab";
 
+// Tagged so advanceEnrollment/sendSingleMessage can tell "deliberately dropped
+// by the allowlist" apart from "the provider rejected this", and treat it the
+// same way they treat a closed kill switch: leave things alone, don't fail.
+function notAllowlistedError(phone) {
+  const err = new Error(`Phone ${phone} is not on SEND_PHONE_ALLOWLIST — send dropped`);
+  err.notAllowlisted = true;
+  return err;
+}
+
+// Parses SEND_PHONE_ALLOWLIST into a Set of cleaned entries (no leading "+",
+// no other non-digit characters), or null when the env var is unset/empty —
+// null means "no allowlist configured, don't filter at all".
+function getAllowlist() {
+  const raw = process.env.SEND_PHONE_ALLOWLIST;
+  if (!raw || !raw.trim()) return null;
+  const entries = raw
+    .split(",")
+    .map((entry) => entry.trim().replace(/\D/g, ""))
+    .filter(Boolean);
+  return entries.length ? new Set(entries) : null;
+}
+
 async function getActiveDoc() {
   return WhatsAppIntegration.findOne({ active: true }).sort({ updatedAt: -1 });
 }
@@ -41,6 +63,11 @@ async function getTemplates() {
 // network call — so "sending is off" can never be reached past.
 async function sendMessage({ phone, templateId, params, channelId, meta }) {
   if (!(await isSendingEnabled())) throw sendingDisabledError();
+  const allowlist = getAllowlist();
+  if (allowlist && !allowlist.has(String(phone).replace(/\D/g, ""))) {
+    console.log(`[allowlist] dropped send to ${phone} (template ${templateId}) — not on SEND_PHONE_ALLOWLIST`);
+    throw notAllowlistedError(phone);
+  }
   const doc = await getActiveDoc();
   if (!doc) throw new Error(NOT_CONNECTED);
   return wati.sendTemplateMessage({
