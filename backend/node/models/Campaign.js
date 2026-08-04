@@ -1,46 +1,230 @@
 const { Schema, model } = require("mongoose");
-const { DYNAMIC_PREFIX } = require("../lib/sourceFields");
-
-const STATIC_TARGET_MODELS = ["Contact", "Lead", "AdMagnetStudent"];
-// Besides the built-in sources, any user-connected Data Source ("datasource:<id>") is a valid target.
-const isValidTargetModel = (v) => STATIC_TARGET_MODELS.includes(v) || v.startsWith(DYNAMIC_PREFIX);
 
 /**
- * A drip campaign: an ordered sequence of WhatsApp template messages sent to
- * enrolled targets (Contacts or Leads), one step per send cycle.
+ * A drip campaign, modelled as a *versioned graph* of typed nodes and edges
+ * rather than the flat `steps: [{ templateId }]` array it used to be.
  *
- * Every message sent outside the customer-initiated 24h window must use a
- * WhatsApp-approved template (created in the connected provider's dashboard
- * first) — so each step references a template by id rather than free-form
- * text. providerMeta carries whatever extra field the connected provider
- * needs (e.g. WATI's required broadcast_name) — optional because not every
- * provider has an equivalent concept.
+ * The flat array could only ever express "send these templates in this order":
+ * no delay between sends, no branch on what the lead did, no second source
+ * feeding the same drip, no per-recipient template variable. A graph expresses
+ * all four, at the cost of needing a stable contract that the walker, the
+ * migration script, the API routes and the canvas editor can all agree on.
+ * That contract is this file.
+ *
+ * Three top-level graph fields:
+ *
+ *   draft       - the in-progress graph an admin is editing on the canvas.
+ *                 Nothing walks the draft; it is scratch space.
+ *   versions[]  - append-only list of published snapshots. Publishing copies
+ *                 draft.nodes/draft.edges into a new entry and points
+ *                 liveVersion at it. Entries are immutable once written: a
+ *                 later publish appends, it never edits or removes.
+ *   liveVersion - the version number new enrollments are pinned to. Null/unset
+ *                 until the first publish, which is why enrolling against a
+ *                 never-published campaign has to be an error rather than a
+ *                 silent fall back to draft.
+ *
+ * Every CampaignEnrollment records the liveVersion in effect when it was
+ * created (`graphVersion`) and walks *that* snapshot for its whole life. This
+ * is the whole point of versioning: an admin can rearrange the draft, or even
+ * publish a new version, without stranding a lead half way through a drip or
+ * silently re-routing it into a flow it never entered.
  */
-const stepSchema = new Schema(
+
+// The nine node kinds. `kind` is a real enum so an unknown kind is rejected at
+// save time rather than surfacing as an unhandled branch inside the walker.
+const NODE_KINDS = ["source", "filter", "message", "wait", "condition", "split", "goal", "action", "exit"];
+
+/**
+ * One node of a graph. Deliberately a single discriminated schema - `kind`
+ * plus a Mixed `config` - rather than nine polymorphic subdocument types, so
+ * one `nodes` array can freely mix kinds and adding a kind doesn't reshape the
+ * collection. The cost is that `config` is unvalidated by Mongoose; the shape
+ * per kind is documented here and is the contract every consumer reads.
+ *
+ *   id       - unique within its own graph (the draft, or a single versions[]
+ *              entry). Enrollments point at nodes by this id, so it must stay
+ *              stable across publishes for an in-flight lead to keep walking.
+ *   kind     - one of NODE_KINDS.
+ *   label    - free-text admin-facing display name; never interpreted.
+ *   position - canvas coordinates, editor-only, no runtime meaning.
+ *   config   - per-kind, as follows:
+ *
+ * `source` - { sourceId, filter, map: { phone, name, email, ... } }
+ *   sourceId identifies the source feeding this branch of the graph: a built-in
+ *   "Contact" / "Lead" / "AdMagnetStudent", or a connected Data Source as
+ *   "datasource:<id>". filter is the same Mongo-ish filter shape already used
+ *   by autoEnrollFilter and matchTargets (plain equality, { $in: [...] }, or a
+ *   single bounded numeric comparison - see isSafeValue in lib/sourceData.js).
+ *   map is the canonical field map: it translates the source's raw field names
+ *   into stable canonical keys (phone, name, email, ...) so every downstream
+ *   node addresses a lead by canonical key instead of per-source field wiring -
+ *   which is what lets one message node serve differently-shaped sources.
+ *   map.phone is required; every other key is optional and source-specific.
+ *   A graph may hold more than one source node (two lead magnets feeding one
+ *   drip); enrollments still carry their own targetModel per row, so that costs
+ *   no enrollment schema change.
+ *
+ * `filter` - { filter }
+ *   Same Mongo-ish filter shape as a source node's filter, applied mid-graph to
+ *   narrow which leads continue past this point.
+ *
+ * `message` - { templateId, providerMeta, params: [{ index, from }] }
+ *   templateId and providerMeta carry over unchanged in meaning from the old
+ *   flat step: every message sent outside the customer-initiated 24h window
+ *   must use a provider-approved template, so a message references a template
+ *   by id rather than free-form text, and providerMeta carries whatever extra
+ *   field the connected provider needs (e.g. WATI's required broadcast_name).
+ *   params fills the template's variable slots: each entry's `index` is the
+ *   variable position in the template and `from` names a canonical key (as
+ *   produced by the enclosing source node's map) whose value is read off the
+ *   lead at send time.
+ *
+ * `wait` - { amount, unit, window: { from, to, tz }, skipDays: [Number] }
+ *   unit is one of "minutes", "hours", "days". window optionally clamps
+ *   delivery into a time-of-day range (from/to) in timezone tz; skipDays
+ *   optionally lists weekday numbers to skip entirely (0 = Sunday).
+ *
+ * `condition` - { on, ...per-kind args }
+ *   on is one of "field", "engagement", "activity", "elapsed"; the remaining
+ *   keys depend on which (a "field" condition needs a field/operator/value, an
+ *   "elapsed" condition needs a duration, and so on). Left as Mixed on purpose
+ *   - enumerating every per-kind arg set as its own sub-schema would freeze
+ *   shapes the walker still owns.
+ *
+ * `split` - { ratio }
+ *   Splits traffic between its "a" and "b" branches by ratio. The branch taken
+ *   for a given lead MUST be derived from a stable hash of the enrollment's
+ *   targetId, never from a random draw, so re-evaluating the same lead always
+ *   re-derives the same branch instead of quietly reshuffling a live A/B test.
+ *   The hashing itself lives in the walker; this note is the requirement.
+ *
+ * `goal` - activity-threshold config (Mixed)
+ *   Evaluated by the walker to pick its "yes" / "no" branch.
+ *
+ * `action` - { url, method, body } for an outbound HTTP call, or a
+ *   source-field write-back shape.
+ *   This is the ONLY node kind that writes - it calls an external endpoint or
+ *   mutates source data, as opposed to reading, branching or sending. Any
+ *   implementation of it MUST be gated by the existing global send kill switch
+ *   (isSendingEnabled in lib/sendingSwitch.js) and MUST default to disabled,
+ *   for the same reason sending does: a fresh install, a wiped database or a
+ *   failed read must never be the reason a real external side effect fires.
+ *   This model captures the config shape only; the gating requirement is
+ *   recorded here so it cannot be lost by whoever implements the handler.
+ *
+ * `exit` - { outcome }
+ *   Terminates the walk for a lead with a labelled outcome.
+ */
+const nodeSchema = new Schema(
   {
-    templateId: { type: String, required: true, trim: true },
-    providerMeta: { type: Schema.Types.Mixed, default: {} },
+    id: { type: String, required: true, trim: true },
+    kind: { type: String, required: true, enum: NODE_KINDS },
+    label: { type: String, trim: true, default: "" },
+    position: {
+      x: { type: Number, default: 0 },
+      y: { type: Number, default: 0 },
+    },
+    config: { type: Schema.Types.Mixed, default: {} },
   },
-  { _id: false }
+  { _id: false, id: false }
 );
+
+/**
+ * A directed edge between two nodes of the same graph.
+ *
+ * `branch` disambiguates which outgoing edge to follow when a node has more
+ * than one:
+ *   "yes" / "no" - edges leaving a `condition` or a `goal` node;
+ *   "a" / "b"    - edges leaving a `split` node;
+ *   absent       - every other kind, which has at most one outgoing edge.
+ * Left a free string rather than an enum: which branch labels a kind emits is
+ * the walker's contract, not the storage layer's.
+ */
+const edgeSchema = new Schema(
+  {
+    id: { type: String, required: true, trim: true },
+    from: { type: String, required: true, trim: true },
+    to: { type: String, required: true, trim: true },
+    branch: { type: String, trim: true },
+  },
+  { _id: false, id: false }
+);
+
+// The editable graph. Identical node/edge shape to a published version.
+const graphSchema = new Schema(
+  {
+    nodes: { type: [nodeSchema], default: [] },
+    edges: { type: [edgeSchema], default: [] },
+  },
+  { _id: false, id: false }
+);
+
+// One published, immutable snapshot. `version` is what an enrollment's
+// graphVersion pins to; the next publish is (highest version so far) + 1.
+const graphVersionSchema = new Schema(
+  {
+    version: { type: Number, required: true, min: 1 },
+    nodes: { type: [nodeSchema], default: [] },
+    edges: { type: [edgeSchema], default: [] },
+    publishedAt: { type: Date, default: Date.now },
+  },
+  { _id: false, id: false }
+);
+
+/**
+ * Structural checks that must hold for any graph - the draft and every
+ * published version alike. A published version is not exempt: the one-time
+ * steps[] migration writes straight into versions[0], and a dangling edge or a
+ * duplicated id there would be just as broken at walk time as it is in a draft.
+ *
+ * Kind validity is not checked here - `kind` is a real Mongoose enum on
+ * nodeSchema, so an unknown kind is already rejected per node.
+ */
+function graphIntegrityErrors(graph) {
+  const errors = [];
+  const nodes = (graph && graph.nodes) || [];
+  const edges = (graph && graph.edges) || [];
+
+  const ids = new Set();
+  const duplicates = new Set();
+  for (const node of nodes) {
+    const id = node && node.id;
+    if (!id) continue; // absence is the `required` validator's business
+    if (ids.has(id)) duplicates.add(id);
+    ids.add(id);
+  }
+  if (duplicates.size) {
+    errors.push(`duplicate node id(s): ${[...duplicates].join(", ")}`);
+  }
+
+  for (const edge of edges) {
+    const label = (edge && edge.id) || "(unnamed)";
+    if (edge && edge.from && !ids.has(edge.from)) {
+      errors.push(`edge "${label}" starts at unknown node "${edge.from}"`);
+    }
+    if (edge && edge.to && !ids.has(edge.to)) {
+      errors.push(`edge "${label}" points at unknown node "${edge.to}"`);
+    }
+  }
+
+  return errors;
+}
 
 const campaignSchema = new Schema(
   {
     name: { type: String, required: true, trim: true, unique: true },
     description: { type: String, trim: true },
-    targetModel: {
-      type: String,
-      required: true,
-      validate: { validator: isValidTargetModel, message: (props) => `"${props.value}" is not a valid targetModel` },
-    },
     // Channel identifier from the connected provider (see
-    // whatsappProvider.getChannels()) — "" sends from the provider's
+    // whatsappProvider.getChannels()) - "" sends from the provider's
     // default channel.
     channelId: { type: String, default: "", trim: true },
-    steps: {
-      type: [stepSchema],
-      validate: (v) => Array.isArray(v) && v.length > 0,
-    },
+    // The graph being edited. Never walked by an enrollment.
+    draft: { type: graphSchema, default: () => ({ nodes: [], edges: [] }) },
+    // Append-only publish history. Nothing may edit or remove an existing entry.
+    versions: { type: [graphVersionSchema], default: [] },
+    // Which versions[].version new enrollments pin to. Null until first publish.
+    liveVersion: { type: Number, default: null },
     active: { type: Boolean, default: true },
     // Re-run this campaign's segment on a schedule, so targets that appear in
     // the source *after* the manual "Send campaign" click still enter the drip.
@@ -51,7 +235,7 @@ const campaignSchema = new Schema(
     // an hour later is invisible to the campaign until someone clicks Send again.
     //
     // autoEnrollFilter is only ever written from a segment the admin previewed
-    // and confirmed, never a filter posted straight at the API — an empty
+    // and confirmed, never a filter posted straight at the API - an empty
     // filter here means "everyone in the source", which is not something to
     // arrive at by accident.
     autoEnroll: { type: Boolean, default: false },
@@ -66,4 +250,32 @@ const campaignSchema = new Schema(
   { timestamps: true }
 );
 
-module.exports = model("Campaign", campaignSchema);
+// Applied identically to the draft and to every published version, because a
+// version is written directly by the migration script and by publish, not only
+// by copying an already-validated draft.
+campaignSchema.path("draft").validate({
+  validator: (graph) => graphIntegrityErrors(graph).length === 0,
+  message: (props) => `draft graph is invalid: ${graphIntegrityErrors(props.value).join("; ")}`,
+});
+
+campaignSchema.path("versions").validate({
+  validator: (versions) => (versions || []).every((entry) => graphIntegrityErrors(entry).length === 0),
+  message: (props) => {
+    const problems = (props.value || [])
+      .map((entry) => {
+        const errors = graphIntegrityErrors(entry);
+        return errors.length ? `version ${entry && entry.version}: ${errors.join("; ")}` : null;
+      })
+      .filter(Boolean);
+    return `published graph is invalid: ${problems.join(" | ")}`;
+  },
+});
+
+const Campaign = model("Campaign", campaignSchema);
+
+// Exported alongside the model so consumers that need to enumerate or validate
+// kinds (API request validation, the canvas editor's node palette) read the
+// list from here instead of re-deriving it.
+Campaign.NODE_KINDS = NODE_KINDS;
+
+module.exports = Campaign;
