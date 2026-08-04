@@ -19,6 +19,8 @@ const W2 = "wamid.TEST.DIRECT.INBOUND.0002"; // the lead's reply
 const PHONE2 = "919000000003";
 const W3 = "wamid.TEST.BOTH.0003";
 
+const NODE_ID = "verify_msg_node"; // the graph node id this fixture's one message step stands in for
+
 const post = async (body) => {
   const res = await fetch(`${BASE}/api/wati/webhook`, {
     method: "POST",
@@ -127,9 +129,10 @@ const check = (name, pass, detail) => {
     targetId: new m.Types.ObjectId(),
     phone: PHONE2,
     status: "completed",
-    currentStepIndex: 0,
+    currentNodeId: NODE_ID,
+    graphVersion: 1,
     nextSendAt: new Date(),
-    history: [{ stepIndex: 0, templateId: "verify_tpl", sentAt: new Date(), status: "sent", providerMessageId: W3 }],
+    history: [{ nodeId: NODE_ID, templateId: "verify_tpl", sentAt: new Date(), status: "sent", providerMessageId: W3 }],
     createdAt: new Date(),
     updatedAt: new Date(),
   });
@@ -181,8 +184,8 @@ const check = (name, pass, detail) => {
   check("kind=campaign returns only campaign sends", campaignOnly.sends?.every((s) => s.kind === "campaign"), "");
   check(
     "campaign row names its campaign and step",
-    campaignRow?.campaignName === "__verify_direct__" && campaignRow?.stepIndex === 0,
-    `${campaignRow?.campaignName} step ${campaignRow?.stepIndex}`
+    campaignRow?.campaignName === "__verify_direct__" && campaignRow?.nodeId === NODE_ID,
+    `${campaignRow?.campaignName} step ${campaignRow?.nodeId}`
   );
   check(
     "campaign row carries delivery for its own message id",

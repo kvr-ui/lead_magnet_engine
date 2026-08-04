@@ -105,6 +105,47 @@ function safeFields(doc) {
   return out;
 }
 
+// Resolve nodeId -> node for the exact graph an enrollment is walking: the
+// versions[] entry matching its graphVersion, per task 3's pinning guarantee
+// that this is always the graph the enrollment actually walked. Falls back to
+// the campaign's draft only when no published version matches (e.g. data from
+// before versioning existed) — better to show something than nothing.
+function graphNodeIndex(campaign, graphVersion) {
+  const version = campaign && (campaign.versions || []).find((v) => v.version === graphVersion);
+  const graph = version || (campaign && campaign.draft) || { nodes: [] };
+  const index = new Map();
+  for (const node of graph.nodes || []) index.set(node.id, node);
+  return index;
+}
+
+// { nodeId, label, templateId } for one node id, so the UI can name a step
+// instead of showing a raw id. templateId is only meaningful for a "message"
+// node; every other kind reports null. Returns null outright for an id with
+// no matching node (deleted node, stale/pre-graph data).
+function describeNode(nodeIndex, nodeId) {
+  if (!nodeId) return null;
+  const node = nodeIndex.get(nodeId);
+  if (!node) return null;
+  return {
+    nodeId,
+    label: node.label || "",
+    templateId: node.kind === "message" ? (node.config && node.config.templateId) || null : null,
+  };
+}
+
+// nodeId lookup for a history entry, keyed by the same provider message ids
+// the webhook uses to attach events to enrollments in the first place (see
+// findTarget in routes/wati.js) — an event's providerMessageId matches either
+// a history entry's own providerMessageId or its providerLocalMessageId.
+function historyNodeIdByProviderId(history) {
+  const map = new Map();
+  for (const entry of history || []) {
+    if (entry.providerMessageId) map.set(entry.providerMessageId, entry.nodeId);
+    if (entry.providerLocalMessageId) map.set(entry.providerLocalMessageId, entry.nodeId);
+  }
+  return map;
+}
+
 // GET /api/enrollments/:id — everything known about one lead's place in a
 // campaign: the enrollment, the campaign it belongs to, the lead record it
 // targets, and every event recorded against it.
@@ -116,9 +157,19 @@ router.get("/enrollments/:id", async (req, res) => {
   if (!enrollment) return res.status(404).json({ error: "Enrollment not found" });
 
   const [campaign, events] = await Promise.all([
-    Campaign.findById(enrollment.campaign).select("name targetModel steps channelId active").lean(),
+    Campaign.findById(enrollment.campaign).select("name channelId active draft versions").lean(),
     MessageEvent.find({ enrollment: id }).sort({ receivedAt: 1 }).select("-payload").lean(),
   ]);
+
+  // Name each step by resolving it against the exact graph version this
+  // enrollment is walking, so the UI can show which step it's at and which
+  // steps it passed through by label/templateId instead of a bare node id.
+  const nodeIndex = graphNodeIndex(campaign, enrollment.graphVersion);
+  enrollment.currentNode = describeNode(nodeIndex, enrollment.currentNodeId);
+  enrollment.history = (enrollment.history || []).map((entry) => {
+    const info = describeNode(nodeIndex, entry.nodeId);
+    return { ...entry, label: info ? info.label : null, templateId: info ? info.templateId : entry.templateId || null };
+  });
 
   // The lead itself lives in whichever collection the campaign targets, so it
   // loads through the same source resolver the engine sends through. A source
@@ -158,15 +209,36 @@ router.get("/direct-messages/:id", async (req, res) => {
 // GET /api/enrollments/:id/events — full event timeline for one lead, oldest
 // first so it reads as a story.
 router.get("/enrollments/:id/events", async (req, res) => {
-  const enrollment = asObjectId(req.params.id);
-  if (!enrollment) return res.status(400).json({ error: "Invalid enrollment id" });
+  const enrollmentId = asObjectId(req.params.id);
+  if (!enrollmentId) return res.status(400).json({ error: "Invalid enrollment id" });
 
-  const events = await MessageEvent.find({ enrollment })
-    .sort({ receivedAt: 1 })
-    .select("-payload") // the raw provider blob is large and nothing renders it
-    .lean();
+  const [enrollmentDoc, events] = await Promise.all([
+    CampaignEnrollment.findById(enrollmentId).select("campaign graphVersion history").lean(),
+    MessageEvent.find({ enrollment: enrollmentId })
+      .sort({ receivedAt: 1 })
+      .select("-payload") // the raw provider blob is large and nothing renders it
+      .lean(),
+  ]);
 
-  res.json({ count: events.length, events });
+  // Name each event's step the same way the enrollment detail does: find the
+  // history entry it belongs to via the provider message ids the webhook
+  // already uses to attach events to enrollments (see findTarget in
+  // routes/wati.js), then resolve that entry's node against the pinned graph.
+  let nodeByProviderId = new Map();
+  let nodeIndex = new Map();
+  if (enrollmentDoc) {
+    const campaign = await Campaign.findById(enrollmentDoc.campaign).select("draft versions").lean();
+    nodeIndex = graphNodeIndex(campaign, enrollmentDoc.graphVersion);
+    nodeByProviderId = historyNodeIdByProviderId(enrollmentDoc.history);
+  }
+
+  const decorated = events.map((event) => {
+    const nodeId = event.providerMessageId ? nodeByProviderId.get(event.providerMessageId) : undefined;
+    const info = nodeId ? describeNode(nodeIndex, nodeId) : null;
+    return { ...event, nodeId: nodeId || null, label: info ? info.label : null, templateId: info ? info.templateId : null };
+  });
+
+  res.json({ count: decorated.length, events: decorated });
 });
 
 // Group events into { <key>: { sent: n, delivered: n, ... } } by one field.
@@ -210,7 +282,7 @@ router.get("/sends", async (req, res) => {
         kind: "campaign",
         enrollmentId: "$_id",
         campaignId: "$campaign",
-        stepIndex: "$history.stepIndex",
+        nodeId: "$history.nodeId",
         phone: "$phone",
         templateId: "$history.templateId",
         sentAt: "$history.sentAt",
@@ -293,7 +365,7 @@ router.get("/sends", async (req, res) => {
       ...r,
       // The table keys on _id; a campaign send is identified by which step of
       // which enrollment it was, since one enrollment holds several sends.
-      _id: r.kind === "campaign" ? `${r.enrollmentId}-${r.stepIndex}` : String(r.directMessageId),
+      _id: r.kind === "campaign" ? `${r.enrollmentId}-${r.nodeId}` : String(r.directMessageId),
       campaignName: r.campaignId ? campaignName.get(String(r.campaignId)) || null : null,
       delivery: r.providerMessageId
         ? byWamid.get(r.providerMessageId) || {}
