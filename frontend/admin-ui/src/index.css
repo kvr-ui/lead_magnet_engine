@@ -1182,6 +1182,108 @@ select:focus-visible {
 .flow-palette-dot-exit {
   background: var(--danger);
 }
+.flow-palette-dot-split {
+  background: var(--text-secondary);
+}
+.flow-palette-dot-goal {
+  background: #f472b6;
+}
+.flow-palette-dot-action {
+  background: #fb923c;
+}
+
+/* --- Preset library (saved, reusable node configurations) ----------------
+   Lives under the node palette in the same left column. A preset is copied
+   into the graph on drop, never linked to it — the copy is what every bit of
+   copy in this panel is telling the admin. */
+
+.flow-preset-library {
+  margin-top: 0.9rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border-soft);
+}
+
+.flow-preset-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 0;
+  background: none;
+  border: none;
+  box-shadow: none;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+
+.flow-preset-toggle:hover {
+  background: none;
+  color: var(--text-secondary);
+}
+
+.flow-preset-caret {
+  font-size: 0.7rem;
+}
+
+.flow-preset-filter {
+  width: 100%;
+  margin: 0.6rem 0 0.2rem;
+  font-size: 0.75rem;
+  padding: 0.35rem 0.5rem;
+}
+
+.flow-preset-group {
+  margin-top: 0.6rem;
+}
+
+.flow-preset-group-head {
+  margin: 0 0 0.35rem;
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.flow-preset-item {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.4rem 0.5rem;
+  margin-bottom: 0.35rem;
+  border-radius: var(--radius-md);
+  background: var(--bg-inset);
+  border: 1px dashed var(--border);
+  font-size: 0.78125rem;
+  color: var(--text-primary);
+  cursor: grab;
+  user-select: none;
+  transition: border-color var(--ease), background var(--ease);
+}
+
+.flow-preset-item:hover {
+  border-color: var(--accent-border);
+  background: var(--bg-surface-2);
+}
+
+.flow-preset-item:active {
+  cursor: grabbing;
+}
+
+.flow-preset-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.flow-preset-item .link-btn {
+  flex: none;
+  font-size: 0.7rem;
+}
 
 .flow-surface {
   position: relative;
@@ -1271,10 +1373,41 @@ select:focus-visible {
   border-left-color: var(--danger);
 }
 .flow-node-split {
-  border-left-color: var(--text-muted);
+  border-left-color: var(--text-secondary);
 }
 .flow-node-action {
+  border-left-color: #fb923c;
+}
+
+/* An action node that isn't switched on. The only node kind with an external
+   side effect, so whether it is live has to be readable off the graph at a
+   glance rather than by opening each one — hence a dashed, dimmed border and
+   a badge on the node itself, not just a line in the inspector. */
+.flow-node-action-off {
+  border-style: dashed;
   border-left-color: var(--text-muted);
+  opacity: 0.82;
+}
+
+.flow-node-badge {
+  margin-left: 0.35rem;
+  padding: 0.05rem 0.3rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.55rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.flow-node-badge-off {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+.flow-node-badge-on {
+  background: var(--warning-soft);
+  border: 1px solid var(--warning);
+  color: var(--warning);
 }
 
 .react-flow__node.selected .flow-node,
@@ -1353,6 +1486,116 @@ select:focus-visible {
 
 .flow-config-panel-kind {
   text-transform: capitalize;
+}
+
+/* --- Split node config --------------------------------------------------- */
+
+.split-ratio-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.split-ratio-row input[type="range"] {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  accent-color: var(--accent);
+}
+
+.split-ratio-row input[type="range"]:hover,
+.split-ratio-row input[type="range"]:focus-visible {
+  border: none;
+  box-shadow: none;
+}
+
+.split-ratio-number {
+  flex: none;
+  width: 4.25rem;
+}
+
+.split-ratio-preview {
+  display: flex;
+  gap: 0.5rem;
+  margin: -0.5rem 0 0.85rem;
+}
+
+.split-ratio-branch {
+  flex: 1 1 0;
+  padding: 0.4rem 0.55rem;
+  border-radius: var(--radius-md);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-soft);
+  font-size: 0.78125rem;
+  color: var(--text-secondary);
+}
+
+.split-ratio-branch strong {
+  color: var(--text-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-right: 0.3rem;
+}
+
+/* --- Action node config ---------------------------------------------------
+   The one node kind that writes. Both gates it passes at walk time — its own
+   enabled toggle and the site-wide send kill switch — are stated here rather
+   than left to be discovered, so switching the node on is never mistaken for
+   the only thing standing between it and a live external call. */
+
+.action-gate {
+  padding: 0.75rem 0.85rem;
+  margin-bottom: 1rem;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--bg-inset);
+}
+
+.action-gate-off {
+  border-color: var(--border);
+}
+
+.action-gate-on {
+  border-color: var(--warning);
+  background: var(--warning-soft);
+}
+
+.action-gate p {
+  margin: 0.5rem 0 0;
+  font-size: 0.75rem;
+}
+
+.action-gate-killswitch {
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed var(--border);
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+}
+
+.form-row textarea.action-body {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  border-radius: var(--radius-md);
+  padding: 0.5rem 0.65rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78125rem;
+  font-weight: 400;
+  resize: vertical;
+  transition: border-color var(--ease), box-shadow var(--ease);
+}
+
+.form-row textarea.action-body:hover {
+  border-color: #33334f;
+}
+
+.form-row textarea.action-body:focus-visible {
+  outline: none;
+  border-color: var(--accent-border);
+  box-shadow: var(--shadow-glow);
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -133,6 +133,36 @@ export function fetchCampaignVersions(id) {
   return getJSON(`/api/campaigns/${id}/versions`);
 }
 
+// POST /api/campaigns/:id/duplicate - clone this campaign's draft graph into a
+// new, unpublished campaign with no enrollments and auto-enroll off. Returns
+// the new campaign, so the caller can open it and swap its source node.
+export function duplicateCampaign(id, body) {
+  return sendJSON("POST", `/api/campaigns/${id}/duplicate`, body || {});
+}
+
+// --- Node presets (reusable node configurations) -------------------------
+//
+// A preset is copied into a campaign's graph when it is inserted, never linked
+// to it: editing one below changes what the *next* insertion produces and
+// nothing already on any canvas. See backend models/NodePreset.js.
+
+export function fetchNodePresets(kind) {
+  const qs = kind ? `?kind=${encodeURIComponent(kind)}` : "";
+  return getJSON(`/api/node-presets${qs}`);
+}
+
+export function createNodePreset({ name, kind, config }) {
+  return sendJSON("POST", "/api/node-presets", { name, kind, config });
+}
+
+export function updateNodePreset(id, body) {
+  return sendJSON("PATCH", `/api/node-presets/${id}`, body);
+}
+
+export function deleteNodePreset(id) {
+  return sendJSON("DELETE", `/api/node-presets/${id}`);
+}
+
 // --- WhatsApp message tracking --------------------------------------
 // Delivery state reported back by the WATI webhook. Separate from a
 // campaign's enrollment counts, which only say how far the drip got — not

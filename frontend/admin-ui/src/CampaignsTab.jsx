@@ -5,6 +5,7 @@ import {
   createCampaign,
   updateCampaign,
   deleteCampaign,
+  duplicateCampaign,
   fetchSegmentMembers,
   fetchTemplates,
   fetchChannels,
@@ -223,7 +224,7 @@ function CreateCampaignForm({ sources, onCreated, onCancel }) {
 
 // --- Campaign detail: filter, preview, send, enrollments -----------------
 
-function CampaignDetail({ campaign, sourceLabels, sources, onClose, onChanged }) {
+function CampaignDetail({ campaign, sourceLabels, sources, onClose, onChanged, onDuplicate, duplicating }) {
   const [conditions, setConditions] = useState([]);
   const [preview, setPreview] = useState(null);
   const [previewedKey, setPreviewedKey] = useState(null);
@@ -421,6 +422,13 @@ function CampaignDetail({ campaign, sourceLabels, sources, onClose, onChanged })
           <button type="button" className="secondary-btn" onClick={toggleActive}>
             {campaign.active ? "Pause" : "Resume"}
           </button>{" "}
+          {/* Clones this flow into a new, unpublished campaign with no
+              enrollments and auto-enroll off, then opens it — the "same
+              nurture sequence, new lead magnet" path: duplicate, swap the
+              source node, publish. */}
+          <button type="button" className="secondary-btn" onClick={() => onDuplicate(campaign)} disabled={duplicating}>
+            {duplicating ? "Duplicating…" : "Duplicate flow"}
+          </button>{" "}
           <button type="button" className="secondary-btn" onClick={onClose}>
             Close
           </button>
@@ -585,19 +593,48 @@ export default function CampaignsTab({ focusCampaignId = null }) {
   const [selectedId, setSelectedId] = useState(focusCampaignId);
   const [sources, setSources] = useState([]);
   const [deletingId, setDeletingId] = useState(null);
+  const [duplicatingId, setDuplicatingId] = useState(null);
   // Per-campaign activation rollup, read from the lead magnet's own database.
   // Its own request rather than part of /api/campaigns: it crosses to a
   // separate database, so a slow or unreachable lead magnet shouldn't hold up
   // the campaign list itself.
   const [activity, setActivity] = useState(null);
 
+  // Returns the campaign list request so a caller that needs the refreshed list
+  // before doing something else (duplicating, which then opens the clone) can
+  // wait for it.
   function reload() {
-    fetchCampaigns()
-      .then(setCampaigns)
-      .catch((err) => setError(err.message));
+    const campaignsLoaded = fetchCampaigns()
+      .then((rows) => {
+        setCampaigns(rows);
+        return rows;
+      })
+      .catch((err) => {
+        setError(err.message);
+        return null;
+      });
     fetchActivitySummary()
       .then(setActivity)
       .catch(() => setActivity(null));
+    return campaignsLoaded;
+  }
+
+  // Clone a proven flow for a new lead magnet. The clone starts unpublished,
+  // with no enrollments and auto-enroll off however the source was set up (see
+  // POST /api/campaigns/:id/duplicate) — so opening it straight away, to swap
+  // its source node before anything is published, is safe.
+  async function handleDuplicate(campaign) {
+    setError(null);
+    setDuplicatingId(campaign._id);
+    try {
+      const clone = await duplicateCampaign(campaign._id);
+      await reload();
+      setSelectedId(clone._id);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setDuplicatingId(null);
+    }
   }
 
   async function handleDelete(campaign) {
@@ -629,7 +666,9 @@ export default function CampaignsTab({ focusCampaignId = null }) {
     }
   }
 
-  useEffect(reload, []);
+  useEffect(() => {
+    reload();
+  }, []);
 
   // The selectable sources come from the backend, which is the only thing that
   // knows what it can actually read: the built-in sources plus every connected,
@@ -743,7 +782,19 @@ export default function CampaignsTab({ focusCampaignId = null }) {
                     {activity?.configured && <td>{activity.campaigns[c._id]?.count || 0}</td>}
                     <td>
                       {/* The row opens the campaign, so the click must stop
-                          here or deleting would also navigate into it. */}
+                          here or these would also navigate into it. */}
+                      <button
+                        type="button"
+                        className="link-btn"
+                        disabled={duplicatingId === c._id}
+                        title="Copy this flow into a new, unpublished campaign with no enrollments"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDuplicate(c);
+                        }}
+                      >
+                        {duplicatingId === c._id ? "Duplicating…" : "Duplicate"}
+                      </button>{" "}
                       <button
                         type="button"
                         className="link-btn danger"
@@ -772,6 +823,8 @@ export default function CampaignsTab({ focusCampaignId = null }) {
           sources={sources}
           onClose={() => setSelectedId(null)}
           onChanged={reload}
+          onDuplicate={handleDuplicate}
+          duplicating={duplicatingId === selected._id}
         />
       )}
     </div>

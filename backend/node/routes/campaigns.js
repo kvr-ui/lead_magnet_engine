@@ -270,18 +270,94 @@ function assertNoBodyFilter(body) {
 // null until the first publish, which is what makes "enroll a campaign nobody
 // published" a detectable error instead of a silent run against a half-drawn
 // draft.
+function createCampaignDocument({ name, description, channelId, draft }) {
+  return Campaign.create({
+    name,
+    ...(description !== undefined ? { description } : {}),
+    ...(channelId !== undefined ? { channelId } : {}),
+    draft: normalizeGraph(draft),
+  });
+}
+
 router.post("/campaigns", async (req, res) => {
   try {
     const { name, description, channelId, draft } = req.body || {};
-    const campaign = await Campaign.create({
-      name,
-      ...(description !== undefined ? { description } : {}),
-      ...(channelId !== undefined ? { channelId } : {}),
-      draft: normalizeGraph(draft),
-    });
+    const campaign = await createCampaignDocument({ name, description, channelId, draft });
     res.status(201).json(campaign);
   } catch (err) {
     res.status(400).json({ error: "Failed to create campaign", detail: err.message });
+  }
+});
+
+// `name` is unique on the schema, so the first free "(copy)" name wins rather
+// than the duplicate failing on the index. Bounded, then stamped: a rename loop
+// that can't terminate is worse than an ugly name.
+async function availableCopyName(baseName) {
+  const first = `${baseName} (copy)`;
+  if (!(await Campaign.exists({ name: first }))) return first;
+  for (let n = 2; n <= 50; n++) {
+    const candidate = `${baseName} (copy ${n})`;
+    if (!(await Campaign.exists({ name: candidate }))) return candidate;
+  }
+  return `${baseName} (copy ${Date.now()})`;
+}
+
+// POST /api/campaigns/:id/duplicate - clone a campaign's *draft* graph into a
+// brand-new, unpublished campaign.
+// Body: { name?, description?, channelId? } - each optional, defaulting to a
+// "(copy)" of the source's.
+//
+// This is the "new lead magnet, same proven nurture sequence" path: clone the
+// flow, swap the source node, publish. What it deliberately does not carry over
+// is everything that would make the clone *live*:
+//
+//   versions[] / liveVersion - the clone starts unpublished, exactly as a
+//     campaign created from scratch does. Copying the source's publish history
+//     would hand a graph nobody reviewed a version number that enrollments pin
+//     to, and would make the clone's history a lie about when it was published.
+//   enrollments - none are created, whatever the source has. They belong to the
+//     campaign that enrolled them; a clone that inherited them would put the
+//     same lead in two drips at once.
+//   autoEnroll - forced off (by omission, so the schema default applies) even
+//     when the source is armed. An armed clone would start pulling leads into a
+//     flow the moment it was created, before its source node had been swapped -
+//     i.e. it would message the *source* campaign's audience again, from a
+//     campaign nobody has looked at yet.
+//
+// Everything else is created through createCampaignDocument above, the same
+// function POST /api/campaigns uses, so `active`, `autoEnrollFilter` and the
+// rest come from one defaulting path rather than a second one that could drift.
+//
+// Node ids are preserved rather than regenerated. The clone is a separate
+// document, so its ids only have to be unique within its own graph - which they
+// already are - and preserving them keeps every edge's from/to pointing where
+// it did without a rewrite pass that could get it wrong.
+router.post("/campaigns/:id/duplicate", async (req, res) => {
+  // lean(): plain objects, structurally detached from the source's
+  // subdocuments, so nothing written into the clone can reach back into the
+  // campaign being copied.
+  const source = await Campaign.findById(req.params.id).lean();
+  if (!source) return res.status(404).json({ error: "Campaign not found" });
+
+  try {
+    const body = req.body || {};
+    const draft = source.draft || {};
+    const name = body.name !== undefined && String(body.name).trim()
+      ? String(body.name).trim()
+      : await availableCopyName(source.name);
+
+    const clone = await createCampaignDocument({
+      name,
+      description: body.description !== undefined ? body.description : source.description,
+      channelId: body.channelId !== undefined ? body.channelId : source.channelId,
+      // Deep copy: the nodes/edges the clone stores must share no object with
+      // the source's, or a later edit of either graph would show up in both.
+      draft: JSON.parse(JSON.stringify({ nodes: draft.nodes || [], edges: draft.edges || [] })),
+    });
+
+    res.status(201).json(clone);
+  } catch (err) {
+    res.status(400).json({ error: "Failed to duplicate campaign", detail: err.message });
   }
 });
 

@@ -370,6 +370,340 @@ function ConditionPanel({ node, defaultFilterSource, onChangeConfig }) {
   );
 }
 
+// split node: { ratio } - the percentage of leads taking branch "a"; the rest
+// take "b". Read by splitBranchFor() in lib/campaignEngine.js, which requires a
+// finite 0-100 number and derives the branch from a stable hash of the lead's
+// id, so the same lead always lands on the same side.
+//
+// There is deliberately no default: the walker refuses a split with no ratio
+// rather than assuming 50, because a guessed ratio quietly invents an
+// experiment nobody designed. This form therefore starts empty and says so.
+function SplitPanel({ node, onChangeConfig }) {
+  const config = node.config || {};
+  const raw = config.ratio;
+  const hasRatio = raw !== undefined && raw !== null && raw !== "" && Number.isFinite(Number(raw));
+  const ratio = hasRatio ? Number(raw) : 50;
+
+  function setRatio(value) {
+    const next = Math.min(100, Math.max(0, Math.round(Number(value) || 0)));
+    onChangeConfig({ ...config, ratio: next });
+  }
+
+  return (
+    <div>
+      <p className="muted">
+        Splits traffic between the two outgoing edges. Which side a lead lands on is derived from their own id, so the
+        same lead always takes the same branch — re-running the flow never reshuffles a live A/B test.
+      </p>
+
+      <label className="form-row">
+        Branch “a” share
+        <div className="split-ratio-row">
+          <input
+            type="range"
+            min="0"
+            max="100"
+            step="1"
+            value={ratio}
+            onChange={(e) => setRatio(e.target.value)}
+            aria-label="Percentage of leads taking branch a"
+          />
+          <input
+            type="number"
+            min="0"
+            max="100"
+            className="split-ratio-number"
+            value={hasRatio ? ratio : ""}
+            placeholder="—"
+            onChange={(e) => setRatio(e.target.value)}
+          />
+          <span className="muted">%</span>
+        </div>
+      </label>
+
+      <div className="split-ratio-preview">
+        <span className="split-ratio-branch">
+          <strong>a</strong> {hasRatio ? `${ratio}%` : "—"}
+        </span>
+        <span className="split-ratio-branch">
+          <strong>b</strong> {hasRatio ? `${100 - ratio}%` : "—"}
+        </span>
+      </div>
+
+      {!hasRatio ? (
+        <p className="error">
+          No ratio set yet — leads reaching this node are parked rather than sent down a guessed branch. Set one above.
+        </p>
+      ) : (
+        <p className="muted">
+          Connect this node's “a” and “b” handles to the two variants — an edge drawn from a handle carries that
+          handle's name as its branch.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// goal node: the activity threshold evaluateGoal() in lib/campaignEngine.js
+// reads - { metric: "count" | "correct" | "graded", threshold: Number,
+// outcome?: String }. Everything counted is activity *since the last send to
+// this lead*, which is what makes the answer attributable to this drip rather
+// than to whatever the lead was doing anyway.
+const GOAL_METRICS = [
+  { value: "count", label: "Activity rows", hint: "anything the lead did" },
+  { value: "correct", label: "Correct answers", hint: "rows flagged correct" },
+  { value: "graded", label: "Graded answers", hint: "rows that were marked at all" },
+];
+
+function GoalPanel({ node, onChangeConfig }) {
+  const config = node.config || {};
+  const metric = config.metric || "count";
+  // The walker accepts `count` as an older spelling of `threshold`; show
+  // whichever is set, and write `threshold` from here on.
+  const storedThreshold = config.threshold === undefined ? config.count : config.threshold;
+  const threshold = storedThreshold === undefined || storedThreshold === null ? "" : storedThreshold;
+
+  function set(patch) {
+    onChangeConfig({ ...config, ...patch });
+  }
+
+  // Cleared means "unset", not zero: a stored 0 would be a threshold every lead
+  // clears, sending everyone down "yes". Left unset, the handler's own default
+  // of 1 applies.
+  function setThreshold(raw) {
+    set({ threshold: raw === "" ? undefined : Number(raw) });
+  }
+
+  return (
+    <div>
+      <p className="muted">
+        Leads who cleared the threshold take the “yes” branch; everyone else takes “no”. Only activity recorded{" "}
+        <em>after the last message this campaign sent them</em> counts.
+      </p>
+
+      <label className="form-row">
+        Measure
+        <select value={metric} onChange={(e) => set({ metric: e.target.value })}>
+          {GOAL_METRICS.map((m) => (
+            <option key={m.value} value={m.value}>
+              {m.label} — {m.hint}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <label className="form-row">
+        At least
+        <input
+          type="number"
+          min="1"
+          value={threshold}
+          placeholder="1"
+          onChange={(e) => setThreshold(e.target.value)}
+        />
+      </label>
+
+      <label className="form-row">
+        Outcome when met
+        <input
+          value={config.outcome || ""}
+          placeholder="goal_met"
+          onChange={(e) => set({ outcome: e.target.value })}
+        />
+        <span className="muted">
+          Recorded as the enrollment's outcome if the “yes” branch ends without an exit node labelling it itself.
+        </span>
+      </label>
+
+      <p className="muted">
+        Needs a connected data source with an activity config (Data Sources tab). Without one this node can't answer its
+        own question, so leads reaching it are parked rather than routed down “no”.
+      </p>
+    </div>
+  );
+}
+
+// action node: the only kind that writes. Two shapes, told apart by
+// `config.mode` (see actionModeFor() in lib/campaignEngine.js):
+//
+//   { mode: "http",   url, method, body, enabled, timeoutMs? }
+//   { mode: "source", field, value, enabled, timeoutMs? }
+//
+// Both are gated twice at walk time — by the site-wide send kill switch first,
+// then by this node's own `enabled` — and both are surfaced here rather than
+// buried, because enabling one of these makes a real external side effect fire.
+const HTTP_METHODS = ["POST", "PUT", "PATCH", "GET", "DELETE"];
+
+function ActionPanel({ node, onChangeConfig, canonicalKeySuggestions }) {
+  const config = node.config || {};
+  const mode = config.mode === "source" ? "source" : "http";
+  const enabled = config.enabled === true;
+
+  // The body is stored as whatever it parses to: an object when the admin types
+  // JSON (each value then interpolated field by field and re-serialized, so a
+  // lead's name can't break the quoting), and the raw string otherwise. The
+  // text being edited is local so a half-typed object isn't thrown away between
+  // keystrokes.
+  const [bodyText, setBodyText] = useState(() => {
+    if (config.body === undefined || config.body === null) return "";
+    return typeof config.body === "string" ? config.body : JSON.stringify(config.body, null, 2);
+  });
+  const bodyIsJson = (() => {
+    if (!bodyText.trim()) return null;
+    try {
+      const parsed = JSON.parse(bodyText);
+      return parsed && typeof parsed === "object";
+    } catch {
+      return false;
+    }
+  })();
+
+  function set(patch) {
+    onChangeConfig({ ...config, ...patch });
+  }
+
+  function setBody(text) {
+    setBodyText(text);
+    if (!text.trim()) return set({ body: undefined });
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === "object") return set({ body: parsed });
+    } catch {
+      /* not JSON — stored verbatim below */
+    }
+    set({ body: text });
+  }
+
+  function setMode(next) {
+    // Only the discriminator changes; the other mode's keys are left in place
+    // so toggling back doesn't lose a URL that was already typed. The walker
+    // dispatches on `mode` alone once it is set, so the unused keys are inert.
+    set({ mode: next });
+  }
+
+  const keysHint = canonicalKeySuggestions.map((k) => `{{${k}}}`).join(", ");
+
+  return (
+    <div>
+      <div className={`action-gate ${enabled ? "action-gate-on" : "action-gate-off"}`}>
+        <label className="checkbox-row">
+          <input type="checkbox" checked={enabled} onChange={(e) => set({ enabled: e.target.checked })} />
+          <strong>{enabled ? "Enabled — this node will fire" : "Disabled — this node will not fire"}</strong>
+        </label>
+        <p className="muted">
+          Action nodes are the only kind that write to the world, so a new one starts <strong>disabled</strong> and stays
+          that way until switched on here. A lead reaching a disabled action node is parked, not walked past.
+        </p>
+        <p className="action-gate-killswitch">
+          Also gated by the site-wide send kill switch: with sending off, an enabled action node still does not fire.
+          Turning this on is not enough on its own.
+        </p>
+      </div>
+
+      <div className="form-row">
+        <span>Mode</span>
+        <div className="value-chip-row">
+          <label className="checkbox-row">
+            <input type="radio" name={`action-mode-${node.id}`} checked={mode === "http"} onChange={() => setMode("http")} />
+            HTTP call
+          </label>
+          <label className="checkbox-row">
+            <input
+              type="radio"
+              name={`action-mode-${node.id}`}
+              checked={mode === "source"}
+              onChange={() => setMode("source")}
+            />
+            Write back to source
+          </label>
+        </div>
+      </div>
+
+      {mode === "http" ? (
+        <>
+          <label className="form-row">
+            URL
+            <input
+              value={config.url || ""}
+              placeholder="https://example.com/hooks/lead"
+              onChange={(e) => set({ url: e.target.value })}
+            />
+          </label>
+          <label className="form-row">
+            Method
+            <select value={config.method || "POST"} onChange={(e) => set({ method: e.target.value })}>
+              {HTTP_METHODS.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="form-row">
+            Body
+            <textarea
+              rows="5"
+              className="action-body"
+              value={bodyText}
+              placeholder={'{ "phone": "{{phone}}", "name": "{{name}}" }'}
+              onChange={(e) => setBody(e.target.value)}
+            />
+            <span className="muted">
+              {bodyIsJson === null
+                ? "Empty — no body is sent. GET and HEAD never send one."
+                : bodyIsJson
+                  ? "Valid JSON — sent as an object, each value interpolated separately."
+                  : "Not JSON — sent verbatim as the request body."}
+            </span>
+          </label>
+          {!config.url && <p className="error">No URL set — a lead reaching this node would fail rather than continue.</p>}
+        </>
+      ) : (
+        <>
+          <label className="form-row">
+            Source field
+            <input
+              value={config.field || ""}
+              placeholder="e.g. nurtureStage"
+              onChange={(e) => set({ field: e.target.value })}
+            />
+            <span className="muted">
+              The raw field name on the source's own documents — not a canonical key. This writes into the lead magnet's
+              collection, so it has to use that collection's own column name.
+            </span>
+          </label>
+          <label className="form-row">
+            Value
+            <input
+              value={config.value === undefined ? "" : config.value}
+              placeholder="e.g. contacted"
+              onChange={(e) => set({ value: e.target.value })}
+            />
+          </label>
+          {!config.field && (
+            <p className="error">No field named — a lead reaching this node would fail rather than continue.</p>
+          )}
+        </>
+      )}
+
+      <label className="form-row">
+        Timeout (ms)
+        <input
+          type="number"
+          min="1"
+          value={config.timeoutMs === undefined ? "" : config.timeoutMs}
+          placeholder="10000"
+          onChange={(e) => set({ timeoutMs: e.target.value === "" ? undefined : Number(e.target.value) })}
+        />
+      </label>
+
+      <p className="muted">
+        Interpolates the lead's canonical keys into the URL, body and value: {keysHint}.
+      </p>
+    </div>
+  );
+}
+
 // exit node: a labelled outcome for the walk ending here.
 function ExitPanel({ node, onChangeConfig }) {
   const config = node.config || {};
@@ -389,11 +723,14 @@ function UnsupportedPanel({ kind }) {
   return <p className="muted">Configuration for "{kind}" nodes isn't available on this canvas yet.</p>;
 }
 
-const IN_SCOPE_KINDS = ["source", "filter", "message", "wait", "condition", "exit"];
+// Every kind in the schema's node-kind enum now has a form. split/goal/action
+// were the three left out when the canvas was first built, because their walker
+// handlers didn't exist yet; they do now, and each panel above emits exactly the
+// config keys its handler reads.
+const IN_SCOPE_KINDS = ["source", "filter", "message", "wait", "condition", "split", "goal", "action", "exit"];
 
 // The side panel FlowCanvas renders for whichever node is selected,
-// dispatching on the node's kind. split/goal/action are out of this task's
-// scope (task 14) and fall through to a placeholder rather than a form.
+// dispatching on the node's kind.
 export default function NodeConfigPanel({
   node,
   sources,
@@ -401,6 +738,8 @@ export default function NodeConfigPanel({
   canonicalKeySuggestions,
   onChangeLabel,
   onChangeConfig,
+  onSaveAsPreset,
+  savingPreset,
   onDelete,
   onClose,
 }) {
@@ -411,6 +750,16 @@ export default function NodeConfigPanel({
       <div className="step-card-head">
         <strong className="flow-config-panel-kind">{node.kind}</strong>
         <div>
+          {/* Saves this node's kind and config to the preset library — never
+              its id or position, which mean nothing off this canvas. The saved
+              copy is independent from this moment on: editing the preset later
+              does not touch this node, and editing this node does not touch the
+              preset. */}
+          {onSaveAsPreset && (
+            <button type="button" className="link-btn" onClick={onSaveAsPreset} disabled={savingPreset}>
+              {savingPreset ? "saving…" : "save as preset"}
+            </button>
+          )}
           <button type="button" className="link-btn danger" onClick={onDelete}>
             delete
           </button>
@@ -433,6 +782,11 @@ export default function NodeConfigPanel({
       {node.kind === "wait" && <WaitPanel node={node} onChangeConfig={onChangeConfig} />}
       {node.kind === "condition" && (
         <ConditionPanel node={node} defaultFilterSource={defaultFilterSource} onChangeConfig={onChangeConfig} />
+      )}
+      {node.kind === "split" && <SplitPanel node={node} onChangeConfig={onChangeConfig} />}
+      {node.kind === "goal" && <GoalPanel node={node} onChangeConfig={onChangeConfig} />}
+      {node.kind === "action" && (
+        <ActionPanel node={node} onChangeConfig={onChangeConfig} canonicalKeySuggestions={canonicalKeySuggestions} />
       )}
       {node.kind === "exit" && <ExitPanel node={node} onChangeConfig={onChangeConfig} />}
       {!IN_SCOPE_KINDS.includes(node.kind) && <UnsupportedPanel kind={node.kind} />}

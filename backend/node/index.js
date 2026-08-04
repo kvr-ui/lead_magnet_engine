@@ -42,6 +42,7 @@ const leadsRouter = require("./routes/leads");
 const adminRouter = require("./routes/admin");
 const contactsRouter = require("./routes/contacts");
 const campaignsRouter = require("./routes/campaigns");
+const nodePresetsRouter = require("./routes/nodePresets");
 const integrationsRouter = require("./routes/integrations");
 const dataSourcesRouter = require("./routes/dataSources");
 const settingsRouter = require("./routes/settings");
@@ -79,6 +80,10 @@ app.use("/api", leadsRouter);
 app.use("/api", contactsRouter);
 app.use("/api", watiRouter);
 app.use("/api", requireAdminAuth, campaignsRouter);
+// The reusable node preset library the campaign canvas inserts from. Presets
+// are copied into a campaign's graph, never linked to it — see
+// models/NodePreset.js.
+app.use("/api", requireAdminAuth, nodePresetsRouter);
 // Reads back what watiRouter's webhook writes. Behind admin auth on purpose —
 // the webhook itself can't be, but nothing that exposes the data should be.
 app.use("/api", requireAdminAuth, messageEventsRouter);
