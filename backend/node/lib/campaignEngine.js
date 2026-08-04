@@ -293,7 +293,7 @@ async function advanceEnrollment(enrollment, campaign) {
     // Sending switched off between the batch being picked up and this send:
     // nothing was mutated above, so leave the lead queued exactly as it was.
     // A closed gate must not burn leads as failed.
-    if (err.sendingDisabled) return;
+    if (err.sendingDisabled || err.notAllowlisted) return;
     enrollment.history.push({
       stepIndex: enrollment.currentStepIndex,
       templateId: step.templateId,
@@ -327,7 +327,7 @@ async function sendSingleMessage({ phone: rawPhone, templateId, providerMeta, ch
     // Sending switched off: nothing left our door, so there is no message to
     // track and a row would read as an attempt that failed. Matches how
     // advanceEnrollment treats a closed gate.
-    if (err.sendingDisabled) throw err;
+    if (err.sendingDisabled || err.notAllowlisted) throw err;
     await DirectMessage.create({ ...base, status: "error", error: err.message });
     throw err;
   }
