@@ -30,6 +30,7 @@ const Campaign = require("../models/Campaign");
 const { getConnectionFor } = require("./dataSourcePool");
 const { cleanPhone } = require("./phone");
 const { DYNAMIC_PREFIX } = require("./sourceFields");
+const { phoneFieldFor } = require("./sourceResolver");
 
 // How long after a message we still credit it for what the lead did. A lead
 // who opens the app eight days later probably didn't do it because of us;
@@ -40,18 +41,6 @@ const DEFAULT_WINDOW_HOURS = 168; // 7 days
 // $in lists are chunked rather than sent whole — a campaign against the full
 // user base would otherwise build a single query with thousands of ids.
 const IN_CHUNK = 500;
-
-// Same guesses lib/campaignEngine.js makes for a data source's phone column;
-// there's no per-connection setting for it.
-const PHONE_FIELD_CANDIDATES = ["phone", "phonenumber", "mobile", "mobilenumber", "contactnumber", "whatsappnumber"];
-
-function guessPhoneField(fieldsCache) {
-  const byLower = new Map((fieldsCache || []).map((k) => [k.toLowerCase(), k]));
-  for (const candidate of PHONE_FIELD_CANDIDATES) {
-    if (byLower.has(candidate)) return byLower.get(candidate);
-  }
-  return null;
-}
 
 function chunk(arr, size) {
   const out = [];
@@ -78,7 +67,9 @@ async function getActivitySource() {
  */
 async function buildUserIndex(source) {
   const conn = await getConnectionFor(source);
-  const phoneField = guessPhoneField(source.fieldsCache);
+  // Same phone column the campaign engine reads this source through — the
+  // connection's canonical mapping, or the shared name guess behind it.
+  const phoneField = phoneFieldFor(source);
   const projection = { [source.activity.localField]: 1 };
   if (phoneField) projection[phoneField] = 1;
   // A display name makes the per-lead table readable; absent on some sources.
