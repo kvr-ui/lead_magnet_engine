@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   fetchCampaigns,
+  fetchCampaign,
   createCampaign,
   updateCampaign,
   deleteCampaign,
@@ -19,6 +20,7 @@ import Pager from "./Pager";
 import FilterCondition, { buildMongoFilter, describeFilter } from "./FilterBuilder";
 import { DeliveryFunnel, DeliveryCell, EnrollmentTimeline } from "./MessageDelivery";
 import CampaignActivity from "./LeadActivity";
+import FlowCanvas from "./FlowCanvas";
 
 const DYNAMIC_PREFIX = "datasource:";
 
@@ -41,14 +43,6 @@ const STATIC_SOURCE_COLUMNS = {
   ],
 };
 
-function emptyStep() {
-  return { templateId: "", broadcastName: "" };
-}
-
-function toApiStep(step) {
-  return { templateId: step.templateId, providerMeta: { broadcastName: step.broadcastName } };
-}
-
 // --- Create campaign form ---------------------------------------------
 
 function CreateCampaignForm({ sources, onCreated, onCancel }) {
@@ -56,22 +50,25 @@ function CreateCampaignForm({ sources, onCreated, onCancel }) {
   const [description, setDescription] = useState("");
   const [targetModel, setTargetModel] = useState("Contact");
   const [channelId, setChannelId] = useState("");
-  const [steps, setSteps] = useState([emptyStep()]);
+  // The flow being drawn on the canvas below, serialized straight into the
+  // shape campaign.draft expects (see FlowCanvas.jsx) and posted as the new
+  // campaign's initial draft on submit.
+  const [graph, setGraph] = useState({ nodes: [], edges: [] });
+  const [graphValid, setGraphValid] = useState(true);
   const [error, setError] = useState(null);
   const [saving, setSaving] = useState(false);
-  const [templates, setTemplates] = useState([]);
-  const [templatesError, setTemplatesError] = useState(null);
   const [channels, setChannels] = useState([]);
   const [channelsError, setChannelsError] = useState(null);
   const [providerConnected, setProviderConnected] = useState(true);
 
   useEffect(() => {
+    // Only used here to detect whether a provider is connected at all - the
+    // template list itself is fetched by FlowCanvas's own message node panel.
     fetchTemplates()
       .then((d) => {
-        setTemplates(d.templates);
         if (d.connected === false) setProviderConnected(false);
       })
-      .catch((err) => setTemplatesError(err.message));
+      .catch(() => {});
     fetchChannels()
       .then((d) => {
         setChannels(d.channels);
@@ -79,10 +76,6 @@ function CreateCampaignForm({ sources, onCreated, onCancel }) {
       })
       .catch((err) => setChannelsError(err.message));
   }, []);
-
-  function updateStep(i, patch) {
-    setSteps(steps.map((s, idx) => (idx === i ? { ...s, ...patch } : s)));
-  }
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -94,7 +87,7 @@ function CreateCampaignForm({ sources, onCreated, onCancel }) {
         description,
         targetModel,
         channelId,
-        steps: steps.map(toApiStep),
+        draft: graph,
       });
       onCreated();
     } catch (err) {
@@ -146,47 +139,11 @@ function CreateCampaignForm({ sources, onCreated, onCancel }) {
         </select>
       </label>
 
-      <h4>Steps</h4>
-      {steps.map((step, i) => (
-        <div className="step-card" key={i}>
-          <div className="step-card-head">
-            <strong>Step {i + 1}</strong>
-            {steps.length > 1 && (
-              <button type="button" className="link-btn" onClick={() => setSteps(steps.filter((_, idx) => idx !== i))}>
-                remove
-              </button>
-            )}
-          </div>
-
-          <label className="form-row">
-            Template name
-            {templatesError && <p className="error">{templatesError}</p>}
-            <select
-              value={step.templateId}
-              onChange={(e) => updateStep(i, { templateId: e.target.value })}
-              required
-            >
-              <option value="">Pick a template…</option>
-              {templates.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.id}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label className="form-row">
-            Broadcast name
-            <input value={step.broadcastName} onChange={(e) => updateStep(i, { broadcastName: e.target.value })} required />
-          </label>
-        </div>
-      ))}
-      <button type="button" className="secondary-btn" onClick={() => setSteps([...steps, emptyStep()])}>
-        + add step
-      </button>
+      <h4>Flow</h4>
+      <FlowCanvas sources={sources} onGraphChange={setGraph} onValidityChange={setGraphValid} />
 
       <div className="form-actions">
-        <button type="submit" disabled={saving}>
+        <button type="submit" disabled={saving || !graphValid}>
           {saving ? "Saving…" : "Create campaign"}
         </button>
         <button type="button" className="secondary-btn" onClick={onCancel}>
@@ -199,7 +156,7 @@ function CreateCampaignForm({ sources, onCreated, onCancel }) {
 
 // --- Campaign detail: filter, preview, send, enrollments -----------------
 
-function CampaignDetail({ campaign, sourceLabels, onClose, onChanged }) {
+function CampaignDetail({ campaign, sourceLabels, sources, onClose, onChanged }) {
   const [conditions, setConditions] = useState([]);
   const [preview, setPreview] = useState(null);
   const [previewedKey, setPreviewedKey] = useState(null);
@@ -211,6 +168,27 @@ function CampaignDetail({ campaign, sourceLabels, onClose, onChanged }) {
   // it, and re-synced because the panel stays mounted across reloads.
   const [armAuto, setArmAuto] = useState(Boolean(campaign.autoEnroll));
   useEffect(() => setArmAuto(Boolean(campaign.autoEnroll)), [campaign._id, campaign.autoEnroll]);
+
+  // The campaign list's row only carries nodeCount/versionCount (see
+  // GET /api/campaigns) - the flow canvas below needs the actual draft graph
+  // and the full versions[] (to know what's currently live), so those are
+  // fetched separately, once per campaign shown.
+  const [fullCampaign, setFullCampaign] = useState(null);
+  const [graphError, setGraphError] = useState(null);
+  useEffect(() => {
+    setFullCampaign(null);
+    fetchCampaign(campaign._id)
+      .then(setFullCampaign)
+      .catch((err) => setGraphError(err.message));
+  }, [campaign._id]);
+
+  const livePublished = useMemo(() => {
+    if (!fullCampaign || fullCampaign.liveVersion === null || fullCampaign.liveVersion === undefined) {
+      return { nodes: [], edges: [] };
+    }
+    const entry = (fullCampaign.versions || []).find((v) => v.version === fullCampaign.liveVersion);
+    return entry ? { nodes: entry.nodes || [], edges: entry.edges || [] } : { nodes: [], edges: [] };
+  }, [fullCampaign]);
 
   const [statusFilter, setStatusFilter] = useState("");
   const [page, setPage] = useState(1);
@@ -364,6 +342,40 @@ function CampaignDetail({ campaign, sourceLabels, onClose, onChanged }) {
             {!campaign.active && " Paused, so rescanning is stopped too."}
           </span>
         </div>
+      )}
+
+      <h4>Flow</h4>
+      {graphError && <p className="error">{graphError}</p>}
+      {fullCampaign ? (
+        <FlowCanvas
+          key={campaign._id}
+          campaignId={campaign._id}
+          initialNodes={(fullCampaign.draft && fullCampaign.draft.nodes) || []}
+          initialEdges={(fullCampaign.draft && fullCampaign.draft.edges) || []}
+          liveVersion={fullCampaign.liveVersion === undefined ? null : fullCampaign.liveVersion}
+          publishedNodes={livePublished.nodes}
+          publishedEdges={livePublished.edges}
+          sources={sources}
+          onSaved={(updated) => {
+            setFullCampaign(updated);
+            onChanged();
+          }}
+          onPublished={(published) => {
+            setFullCampaign((prev) =>
+              prev && {
+                ...prev,
+                liveVersion: published.liveVersion,
+                versions: [
+                  ...(prev.versions || []),
+                  { version: published.version, nodes: published.nodes, edges: published.edges, publishedAt: published.publishedAt },
+                ],
+              }
+            );
+            onChanged();
+          }}
+        />
+      ) : (
+        !graphError && <p className="muted">Loading flow…</p>
       )}
 
       <h4>Build a segment</h4>
@@ -651,6 +663,7 @@ export default function CampaignsTab({ focusCampaignId = null }) {
         <CampaignDetail
           campaign={selected}
           sourceLabels={sourceLabels}
+          sources={sources}
           onClose={() => setSelectedId(null)}
           onChanged={reload}
         />
