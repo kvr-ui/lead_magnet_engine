@@ -2,6 +2,7 @@ const express = require("express");
 const CampaignEnrollment = require("../models/CampaignEnrollment");
 const DirectMessage = require("../models/DirectMessage");
 const MessageEvent = require("../models/MessageEvent");
+const OptOut = require("../models/OptOut");
 const { cleanPhone } = require("../lib/phone");
 const { asyncRouter } = require("../lib/asyncRouter");
 
@@ -78,6 +79,53 @@ function normalizeStatus(body, eventType) {
 function extractText(body) {
   const raw = body.text || body.messageText || body.data?.text;
   return typeof raw === "string" ? raw : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Global WhatsApp opt-out (STOP-keyword handling)
+// ---------------------------------------------------------------------------
+// Deliberately implemented here, always-on and independent of any particular
+// campaign, rather than as a node type on the campaign flow canvas. If
+// opt-out were just another node a campaign designer could place, a flow
+// where someone forgot to wire in a STOP-handling node would keep messaging
+// people who explicitly asked to stop. Every inbound message on every
+// campaign (and every direct send) passes through this one webhook handler,
+// so checking here is the only way to guarantee the rule can't be bypassed by
+// a campaign's graph shape.
+const STOP_KEYWORDS = new Set(
+  ["STOP", "UNSUBSCRIBE", "UNSUB", "OPTOUT", "OPT OUT", "CANCEL", "QUIT", "END", "बंद", "रोको"].map((k) =>
+    k.toLowerCase()
+  )
+);
+
+// Case-insensitive, trimmed, WHOLE-message match — deliberately not a
+// substring test. "stop by tomorrow" must not opt someone out; only a reply
+// whose entire trimmed body equals one of the keywords counts. Returns the
+// trimmed original text (for storing as OptOut.keyword) or undefined.
+function matchStopKeyword(text) {
+  if (typeof text !== "string") return undefined;
+  const trimmed = text.trim();
+  if (!trimmed) return undefined;
+  return STOP_KEYWORDS.has(trimmed.toLowerCase()) ? trimmed : undefined;
+}
+
+// Record the opt-out and cancel every active enrollment for this phone across
+// every campaign — opt-out is a global, per-phone concern, not a per-campaign
+// one, so this deliberately does not scope to whichever campaign/enrollment
+// this particular inbound reply happens to be matched to.
+async function recordOptOut(phone, keyword) {
+  await OptOut.findOneAndUpdate(
+    { phone },
+    { $set: { source: "inbound-keyword", keyword }, $setOnInsert: { phone } },
+    { upsert: true, setDefaultsOnInsert: true }
+  );
+  const { modifiedCount } = await CampaignEnrollment.updateMany(
+    { phone, status: "active" },
+    { $set: { status: "cancelled" } }
+  );
+  console.log(
+    `[wati/webhook] opt-out: ${phone} sent "${keyword}" — cancelled ${modifiedCount} active enrollment(s) across all campaigns`
+  );
 }
 
 // What an event belongs to — a campaign enrollment or a manual single-number
@@ -232,6 +280,26 @@ router.post("/wati/webhook", async (req, res) => {
     // That's the dedupe index doing its job, not a failure worth reporting.
     if (err.code !== 11000) throw err;
     console.log(`[wati/webhook] duplicate ${eventType} for ${providerMessageId} — ignored`);
+  }
+
+  // STOP-keyword opt-out detection — additive on top of the classification
+  // above, and deliberately isolated in its own try/catch. `body.owner ===
+  // false` is the same "this is an inbound message from the lead" signal
+  // normalizeStatus() uses to classify the event as "received"; ordinary
+  // (non-STOP) inbound replies are completely unaffected by this block and
+  // continue to be recorded exactly as before via MessageEvent above.
+  //
+  // A non-2xx response here just makes WATI retry the same event, so a bug or
+  // a transient DB error in opt-out processing must never surface as one —
+  // that would risk WATI re-delivering the event indefinitely instead of
+  // simply skipping opt-out processing for this one event.
+  try {
+    if (body.owner === false && phone) {
+      const keyword = matchStopKeyword(extractText(body));
+      if (keyword) await recordOptOut(phone, keyword);
+    }
+  } catch (err) {
+    console.error(`[wati/webhook] opt-out handling failed for ${phone || "unknown"}:`, err.message);
   }
 
   // WATI expects a 200 regardless of whether we matched an enrollment —

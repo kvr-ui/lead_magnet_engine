@@ -46,6 +46,7 @@ const settingsRouter = require("./routes/settings");
 const watiRouter = require("./routes/wati");
 const messageEventsRouter = require("./routes/messageEvents");
 const activityRouter = require("./routes/activity");
+const optOutsRouter = require("./routes/optOuts");
 const { startScheduler } = require("./lib/campaignEngine");
 const { requireAdminAuth } = require("./lib/adminAuth");
 const whatsappProvider = require("./lib/whatsappProvider");
@@ -86,6 +87,9 @@ app.use("/api", requireAdminAuth, activityRouter);
 app.use("/api", requireAdminAuth, integrationsRouter);
 app.use("/api", requireAdminAuth, dataSourcesRouter);
 app.use("/api", requireAdminAuth, settingsRouter);
+// Global, always-on opt-out management (see models/OptOut.js). Admin-only,
+// same as the other data-exposing routes.
+app.use("/api", requireAdminAuth, optOutsRouter);
 app.use("/api/ad-magnet", requireAdminAuth, adMagnetRouter);
 app.use("/admin", requireAdminAuth, adminRouter);
 // React leads dashboard (admin-ui/), built via `npm run build` in that folder.
