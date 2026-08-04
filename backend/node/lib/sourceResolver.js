@@ -1,13 +1,12 @@
 const Contact = require("../models/Contact");
 const Lead = require("../models/Lead");
-const { getAdMagnetConnection } = require("../db");
 const { DYNAMIC_PREFIX } = require("./sourceFields");
 
 /**
  * The one place that answers "what is this source, and how do I read it".
  *
- * A source is named by a single string — "Contact", "Lead", "AdMagnetStudent",
- * or "datasource:<DataSourceConnection id>" — and every part of the app that
+ * A source is named by a single string — "Contact", "Lead", or
+ * "datasource:<DataSourceConnection id>" — and every part of the app that
  * has to read from one (the campaign engine's enroll/send loop, the segment
  * builder's member/value endpoints, the enrollment detail panel, activity
  * reporting) resolves it here instead of re-deriving its own branch. Before
@@ -20,7 +19,7 @@ const { DYNAMIC_PREFIX } = require("./sourceFields");
  *   { kind, model | collection, find(filter), findById(id), mapDoc(doc) }
  *
  * `kind` ("model" for the Mongoose-backed Contact/Lead, "collection" for the
- * native-driver AdMagnetStudent and user-connected data sources) and the
+ * native-driver user-connected data sources) and the
  * matching handle are the raw escape hatch for callers that run their own
  * aggregation or pagination against the source. find/findById/mapDoc are the
  * canonical read: they speak in canonical keys, not in whatever the source
@@ -40,6 +39,48 @@ const { DYNAMIC_PREFIX } = require("./sourceFields");
 // common naming conventions. This is the single copy: it used to be duplicated
 // verbatim in lib/campaignEngine.js and lib/leadActivity.js.
 const PHONE_FIELD_CANDIDATES = ["phone", "phonenumber", "mobile", "mobilenumber", "contactnumber", "whatsappnumber"];
+
+/**
+ * READ-COMPATIBILITY SHIM — the only place in the codebase that still names
+ * the retired "AdMagnetStudent" source, and deliberately so.
+ *
+ * CA Guru used to be a hardcoded, code-level source: its own connection from
+ * AD_MAGNET_MONGODB_URI, a hardcoded `users` collection, and a hand-written
+ * $lookup for its MCQ totals. All three are now declarative fields on an
+ * ordinary DataSourceConnection (see tools/seed-ca-guru-source.js), so the
+ * special case is gone.
+ *
+ * What cannot go is the string itself. CampaignEnrollment rows created before
+ * the migration carry `targetModel: "AdMagnetStudent"`, and a lead whose target
+ * document no longer loads is a lead whose detail panel breaks. So the name
+ * still resolves — by redirecting to the generic connection rather than by
+ * keeping any of the old machinery alive.
+ *
+ * This is a READ shim, not a valid target for new work: models/
+ * CampaignEnrollment.js no longer accepts "AdMagnetStudent" as a targetModel,
+ * so nothing new can be created against it. New campaigns go through
+ * "datasource:<id>" like every other source.
+ *
+ * The pointer lives in the database (an AppSetting written by the seed) rather
+ * than in the environment, because the point of the retirement is that the
+ * running app no longer needs AD_MAGNET_MONGODB_URI at all.
+ */
+const LEGACY_AD_MAGNET_SOURCE = "AdMagnetStudent";
+const COMPAT_SETTING_KEY = "adMagnetCompatDataSourceId";
+
+// Memoised briefly: this is read on every resolve of a legacy row, and the
+// pointer changes only when the seed runs.
+const COMPAT_TTL_MS = 60_000;
+let compatCache = { id: null, at: 0 };
+
+async function legacyAdMagnetDataSourceId() {
+  if (compatCache.id && Date.now() - compatCache.at < COMPAT_TTL_MS) return compatCache.id;
+  const AppSetting = require("../models/AppSetting");
+  const doc = await AppSetting.findOne({ key: COMPAT_SETTING_KEY }).lean();
+  const id = doc && doc.value ? String(doc.value) : null;
+  if (id) compatCache = { id, at: Date.now() };
+  return id;
+}
 
 function guessPhoneField(fieldsCache) {
   const byLower = new Map((fieldsCache || []).map((k) => [k.toLowerCase(), k]));
@@ -139,12 +180,12 @@ function buildSource({ kind, model, collection, fields, phoneError }) {
 /**
  * Resolves a source name to a canonical, readable handle.
  *
- * Contact/Lead are our own Mongoose models. AdMagnetStudent is CA Guru's
- * `users` collection on the separate, read-only ad-magnet connection (it calls
- * the column `phoneNumber` and has no schema here). "datasource:<id>" is any
+ * Contact/Lead are our own Mongoose models. "datasource:<id>" is any
  * user-connected external collection, read over the pooled connection and —
  * when the connection has `enrich` configured — wrapped so the joined virtual
- * fields keep resolving through find/findById/mapDoc as well.
+ * fields keep resolving through find/findById/mapDoc as well. The retired
+ * source name handled above that is a read shim over the same generic path,
+ * not a fourth kind of source.
  */
 async function resolveSource(sourceId, map) {
   if (sourceId === "Contact") {
@@ -165,15 +206,20 @@ async function resolveSource(sourceId, map) {
     });
   }
 
-  if (sourceId === "AdMagnetStudent") {
-    const conn = getAdMagnetConnection();
-    if (!conn) throw new Error("AD_MAGNET_MONGODB_URI not configured — AdMagnetStudent target unavailable");
-    return buildSource({
-      kind: "collection",
-      collection: conn.db.collection("users"),
-      fields: mergeMap({ phone: "phoneNumber" }, map),
-      phoneError: 'No phone field mapped for source "AdMagnetStudent"',
-    });
+  if (sourceId === LEGACY_AD_MAGNET_SOURCE) {
+    const id = await legacyAdMagnetDataSourceId();
+    if (!id) {
+      throw new Error(
+        `The retired "${LEGACY_AD_MAGNET_SOURCE}" source resolves through the CA Guru DataSourceConnection, which has not been seeded — run tools/seed-ca-guru-source.js (it also runs at startup)`
+      );
+    }
+    // phoneNumber is what CA Guru's documents call the phone column, and what
+    // the hardcoded source declared. Kept as the default so a legacy row
+    // resolves identically to before; anything the caller maps explicitly
+    // still wins.
+    const legacyMap = { phone: "phoneNumber" };
+    for (const [key, field] of Object.entries(map || {})) if (field) legacyMap[key] = field;
+    return resolveSource(`${DYNAMIC_PREFIX}${id}`, legacyMap);
   }
 
   if (sourceId && sourceId.startsWith(DYNAMIC_PREFIX)) {

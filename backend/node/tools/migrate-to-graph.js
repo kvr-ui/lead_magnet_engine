@@ -69,7 +69,8 @@
  *    exactly one of migrated / skipped / failed, each with a printed reason,
  *    and the process exits non-zero if anything failed.
  *
- * NOT this script's job: deleting the AdMagnetStudent source (it stays a valid
+ * NOT this script's job: retiring the hardcoded CA Guru source (that is
+ * tools/seed-ca-guru-source.js's job, and it stayed a valid
  * `sourceId` and migrates like any other `targetModel`), resolving sources,
  * populating `config.map` (no historical data to derive it from — a later admin
  * action fills it in), or changing how enrollments are advanced.

@@ -10,7 +10,7 @@ const { resolveSource } = require("./sourceResolver");
 // both uniformly.
 //
 // A thin wrapper rather than its own switch: lib/sourceResolver.js owns the
-// one Contact/Lead/AdMagnetStudent/datasource:<id> branch in the codebase.
+// one Contact/Lead/datasource:<id> branch in the codebase.
 async function getSourceHandle(source) {
   const resolved = await resolveSource(source);
   return resolved.kind === "model"

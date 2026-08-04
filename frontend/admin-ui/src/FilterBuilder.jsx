@@ -13,7 +13,7 @@ const COMPARISON_OPS = [
 // discovered values to include (equality via $in) or compare it against a
 // number (e.g. an enrichment metric like totalAttempted < 1). `source` is
 // any value getSourceFields on the backend understands —
-// "Contact"/"Lead"/"AdMagnetStudent" or "datasource:<id>" for a
+// "Contact"/"Lead" or "datasource:<id>" for a
 // user-connected external collection.
 export function FilterCondition({ source, condition, onChange, onRemove }) {
   const [fields, setFields] = useState([]);
