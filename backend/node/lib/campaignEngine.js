@@ -3,6 +3,7 @@ const CampaignEnrollment = require("../models/CampaignEnrollment");
 const DirectMessage = require("../models/DirectMessage");
 const Contact = require("../models/Contact");
 const Lead = require("../models/Lead");
+const OptOut = require("../models/OptOut");
 const { getAdMagnetConnection } = require("../db");
 const { cleanPhone } = require("./phone");
 const whatsappProvider = require("./whatsappProvider");
@@ -113,8 +114,9 @@ async function getAdapter(targetModel) {
 }
 
 // Shared by previewTargets (read-only) and enrollTargets (writes): finds
-// everything matching `filter`, cleans phone numbers, and checks which are
-// already enrolled in this campaign.
+// everything matching `filter`, cleans phone numbers, excludes anyone who has
+// opted out, and checks which of what's left is already enrolled in this
+// campaign.
 async function matchTargets(campaign, filter) {
   const adapter = await getAdapter(campaign.targetModel);
   const targets = await adapter.find(filter || {});
@@ -136,23 +138,39 @@ async function matchTargets(campaign, filter) {
     cleaned.push({ _id: t._id, phone });
   }
 
+  // Opt-out is checked before the already-enrolled check, and against every
+  // campaign's history at once — it's a global, per-phone concern (see
+  // models/OptOut.js), not something scoped to this one campaign. Filtering
+  // here, ahead of enrollTargets' bulkWrite, is what guarantees an opted-out
+  // phone is never (re-)enrolled, whatever filter a campaign is run with.
+  const optedOutPhones = new Set(
+    (
+      await OptOut.find({ phone: { $in: cleaned.map((c) => c.phone) } })
+        .select("phone")
+        .lean()
+    ).map((o) => o.phone)
+  );
+  const skippedOptedOut = cleaned.filter((c) => optedOutPhones.has(c.phone)).length;
+  const eligible = cleaned.filter((c) => !optedOutPhones.has(c.phone));
+
   const existing = await CampaignEnrollment.find({
     campaign: campaign._id,
     targetModel: campaign.targetModel,
-    targetId: { $in: cleaned.map((c) => c._id) },
+    targetId: { $in: eligible.map((c) => c._id) },
   })
     .select("targetId")
     .lean();
   const existingIds = new Set(existing.map((e) => String(e.targetId)));
-  const willEnroll = cleaned.filter((c) => !existingIds.has(String(c._id))).length;
+  const willEnroll = eligible.filter((c) => !existingIds.has(String(c._id))).length;
 
   return {
     matched,
     skippedNoPhone,
     skippedBadPhone,
-    alreadyEnrolled: cleaned.length - willEnroll,
+    skippedOptedOut,
+    alreadyEnrolled: eligible.length - willEnroll,
     willEnroll,
-    cleaned, // internal — enrollTargets uses this to build write ops
+    cleaned: eligible, // internal — enrollTargets uses this to build write ops
   };
 }
 
