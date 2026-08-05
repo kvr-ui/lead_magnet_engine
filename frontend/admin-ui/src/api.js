@@ -115,9 +115,14 @@ export function enrollCampaign(id, filter, autoEnroll = false) {
   return sendJSON("POST", `/api/campaigns/${id}/enroll`, { filter, autoEnroll });
 }
 
-export function fetchEnrollments(id, status = "", page = 1) {
+// `limit` is optional and defaults to whatever the endpoint defaults to
+// (100). The stuck-leads rollup (task 24, #24) passes the endpoint's own
+// page-size cap (1000) explicitly so it can walk every paused/failed
+// enrollment in as few requests as possible.
+export function fetchEnrollments(id, status = "", page = 1, limit = null) {
   const params = new URLSearchParams({ page });
   if (status) params.set("status", status);
+  if (limit) params.set("limit", limit);
   return getJSON(`/api/campaigns/${id}/enrollments?${params.toString()}`);
 }
 
