@@ -114,16 +114,14 @@ function CreateCampaignForm({ sources, onCreated, onCancel }) {
   const [description, setDescription] = useState("");
   // Seeded from whatever the backend offers first rather than from a source
   // name written here, so this form has no opinion about which sources exist.
-  const [targetModel, setTargetModel] = useState("");
+  // Where this campaign's leads come from - on submit this becomes a real
+  // source node in the new campaign's draft graph (see handleSubmit) rather
+  // than a campaign-level field, which nothing reads any more.
+  const [sourceId, setSourceId] = useState("");
   useEffect(() => {
-    setTargetModel((current) => current || (sources[0] && sources[0].value) || "");
+    setSourceId((current) => current || (sources[0] && sources[0].value) || "");
   }, [sources]);
   const [channelId, setChannelId] = useState("");
-  // The flow being drawn on the canvas below, serialized straight into the
-  // shape campaign.draft expects (see FlowCanvas.jsx) and posted as the new
-  // campaign's initial draft on submit.
-  const [graph, setGraph] = useState({ nodes: [], edges: [] });
-  const [graphValid, setGraphValid] = useState(true);
   const [error, setError] = useState(null);
   const [saving, setSaving] = useState(false);
   const [channels, setChannels] = useState([]);
@@ -146,19 +144,38 @@ function CreateCampaignForm({ sources, onCreated, onCancel }) {
       .catch((err) => setChannelsError(err.message));
   }, []);
 
+  // The chosen source becomes the seed for the new campaign's graph: a
+  // single source node, carrying the chosen source id in its config and
+  // labelled with the source's display name, positioned near the top-left of
+  // the canvas so it reads as the flow's starting point. Mirrors the node
+  // shape FlowCanvas.jsx itself builds on drop (id/kind/label/position/config
+  // - see its onDrop/toDomainGraph). It still needs a phone mapping and an
+  // outgoing edge before it can be published or enrolled (graphValidation.js
+  // / campaignTargets.js), which the validation panel surfaces the moment the
+  // new campaign opens on its Flow tab - exactly the next step for the admin.
+  function seedSourceNode() {
+    const chosen = sources.find((s) => s.value === sourceId);
+    return {
+      id: `source-${Date.now().toString(36)}-seed`,
+      kind: "source",
+      label: (chosen && chosen.label) || sourceId,
+      position: { x: 80, y: 80 },
+      config: { sourceId },
+    };
+  }
+
   async function handleSubmit(e) {
     e.preventDefault();
     setError(null);
     setSaving(true);
     try {
-      await createCampaign({
+      const created = await createCampaign({
         name,
         description,
-        targetModel,
         channelId,
-        draft: graph,
+        draft: { nodes: [seedSourceNode()], edges: [] },
       });
-      onCreated();
+      onCreated(created);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -185,17 +202,6 @@ function CreateCampaignForm({ sources, onCreated, onCancel }) {
       </label>
 
       <label className="form-row">
-        Target source
-        <select value={targetModel} onChange={(e) => setTargetModel(e.target.value)}>
-          {sources.map((s) => (
-            <option key={s.value} value={s.value}>
-              {s.label}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <label className="form-row">
         Send from (channel)
         {channelsError && <p className="error">{channelsError}</p>}
         <select value={channelId} onChange={(e) => setChannelId(e.target.value)} required>
@@ -208,11 +214,19 @@ function CreateCampaignForm({ sources, onCreated, onCancel }) {
         </select>
       </label>
 
-      <h4>Flow</h4>
-      <FlowCanvas sources={sources} onGraphChange={setGraph} onValidityChange={setGraphValid} />
+      <label className="form-row">
+        Leads from (source)
+        <select value={sourceId} onChange={(e) => setSourceId(e.target.value)}>
+          {sources.map((s) => (
+            <option key={s.value} value={s.value}>
+              {s.label}
+            </option>
+          ))}
+        </select>
+      </label>
 
       <div className="form-actions">
-        <button type="submit" disabled={saving || !graphValid}>
+        <button type="submit" disabled={saving}>
           {saving ? "Saving…" : "Create campaign"}
         </button>
         <button type="button" className="secondary-btn" onClick={onCancel}>
@@ -827,9 +841,13 @@ export default function CampaignsTab({
           {showCreate && (
             <CreateCampaignForm
               sources={sources}
-              onCreated={() => {
+              onCreated={(created) => {
                 setShowCreate(false);
-                reload();
+                // Land the admin on the new campaign's Flow tab (its default
+                // sub-tab) with the seeded source node already on the canvas,
+                // rather than back on the list - reload() first so `selected`
+                // below can actually find the freshly created campaign.
+                reload().then(() => setSelectedId(created._id));
               }}
               onCancel={() => setShowCreate(false)}
             />
