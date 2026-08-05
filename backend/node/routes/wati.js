@@ -6,6 +6,7 @@ const OptOut = require("../models/OptOut");
 const { cleanPhone } = require("../lib/phone");
 const { asyncRouter } = require("../lib/asyncRouter");
 const { handleInboundReply } = require("../lib/replyFlows");
+const { findBySecret } = require("../lib/whatsappProvider");
 
 const router = asyncRouter();
 
@@ -47,6 +48,35 @@ function extractLocalMessageId(body) {
 // lead's new message and matches nothing we sent.
 function extractReplyContextId(body) {
   return body.replyContextId ? String(body.replyContextId) : "";
+}
+
+// The raw payload `type` field — "button", "list", "text", or absent — which
+// is how a quick-reply tap is told apart from typed text; both otherwise land
+// identically in `text`. Deliberately reads `body.type` directly rather than
+// reusing extractEventType()'s fallback chain, since that fallback exists to
+// find an event *name* when eventType is missing, not to classify interaction
+// shape.
+function extractInteractiveType(body) {
+  return body.type ? String(body.type) : "";
+}
+
+// The tapped button/list option's machine-stable id — captured opportunistically
+// under whatever plausible field name happens to be present. UNCONFIRMED: the
+// one real captured button fixture in this repo carries no such field at all,
+// only { type: "button", text: "<button label>" }. Nothing downstream may
+// depend on this returning a value. Confirm the real field name by sending one
+// live quick-reply template and reading the `[wati/webhook] ... body:` log
+// line below, then tighten this function accordingly.
+function extractInteractivePayloadId(body) {
+  const raw =
+    body.buttonPayload ||
+    body.payloadId ||
+    body.replyId ||
+    body.button?.payload ||
+    body.interactive?.button_reply?.id ||
+    body.interactive?.list_reply?.id ||
+    body.listReply?.id;
+  return raw ? String(raw) : "";
 }
 
 // True for the events that announce a send we made ("templateMessageSent",
@@ -244,10 +274,24 @@ async function backfillDirectMessageIds(directMessage, providerMessageId, localM
 // POST /api/wati/webhook — WATI calls this on message status changes, replies,
 // and button clicks. Registered under Integrations > WhatsApp in the admin UI.
 //
-// This endpoint takes NO secret: any caller that reaches it can write a
-// MessageEvent. Nothing here is authenticated, so only expose it through the
-// webhook bridge (tools/webhook-bridge.js), never by tunnelling port 3000.
+// Authenticated with the shared secret generated on connect
+// (lib/whatsappProvider.js `connect()`), sent back by WATI as either
+// `?secret=` (baked into the webhook URL shown in Integrations) or an
+// `x-webhook-secret` header (used by tools/webhook-bridge.js). Checked before
+// any classification or persistence runs — an unauthenticated caller must not
+// be able to write a MessageEvent or, worse, forge a STOP opt-out.
 router.post("/wati/webhook", async (req, res) => {
+  const suppliedSecret = req.query.secret || req.headers["x-webhook-secret"] || "";
+  const integration = await findBySecret(suppliedSecret);
+  if (!integration) {
+    // Never log the supplied value itself — only its length, so a
+    // misconfigured operator is visible in the logs without leaking a
+    // near-miss secret. WATI retries on non-2xx, so this shows up promptly
+    // rather than as silent data loss.
+    console.warn(`[wati/webhook] rejected: invalid or missing secret (length=${String(suppliedSecret).length})`);
+    return res.status(401).json({ error: "invalid webhook secret" });
+  }
+
   const body = req.body || {};
   console.log(`[wati/webhook] ${new Date().toISOString()} body:`, JSON.stringify(body));
 
@@ -256,6 +300,8 @@ router.post("/wati/webhook", async (req, res) => {
   const providerMessageId = extractProviderMessageId(body);
   const localMessageId = extractLocalMessageId(body);
   const replyContextId = extractReplyContextId(body);
+  const interactiveType = extractInteractiveType(body);
+  const interactivePayloadId = extractInteractivePayloadId(body);
   const { enrollment, directMessage } = await findTarget({ phone, providerMessageId, localMessageId, replyContextId });
 
   if (isOutboundSendEvent(eventType)) {
@@ -272,6 +318,9 @@ router.post("/wati/webhook", async (req, res) => {
       eventType,
       status: normalizeStatus(body, eventType),
       providerMessageId: providerMessageId || undefined,
+      inReplyToProviderMessageId: replyContextId || undefined,
+      interactiveType: interactiveType || undefined,
+      interactivePayloadId: interactivePayloadId || undefined,
       text: extractText(body),
       failedCode: body.failedCode ? String(body.failedCode) : undefined,
       failedDetail: body.failedDetail,
