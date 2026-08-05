@@ -167,9 +167,101 @@ async function recentSendCount(phone, since, { includeManual = false } = {}) {
   return { count: all.length, oldestAt };
 }
 
+// --- Validation (task 11: admin UI) -----------------------------------
+//
+// normalizePolicy() above is deliberately forgiving — a bad shape from a
+// hand-edited row or an old draft is silently coerced to a safe default so
+// the walker never throws. That is the wrong behavior for an operator typing
+// into a form: an inverted quiet-hours window, a zero/negative cap, or a
+// typo'd timezone would otherwise be "corrected" without a word and only
+// show up later as an enrollment parked for a reason nobody configured on
+// purpose. validatePolicyPatch() is the strict counterpart used by the route
+// before anything reaches setSendPolicy() — pure (no I/O), so it can run
+// ahead of the database call and be exercised directly by the verify
+// harness. It does not change normalizePolicy's own defaulting semantics.
+function isValidTimeOfDay(value) {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(String(value === undefined || value === null ? "" : value).trim());
+  if (!match) return false;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  return hour <= 23 && minute <= 59;
+}
+
+function timeToMinutes(value) {
+  const [h, m] = String(value).trim().split(":").map(Number);
+  return h * 60 + m;
+}
+
+function isKnownTimeZone(tz) {
+  try {
+    // eslint-disable-next-line no-new
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Checks a patch of the same shape setSendPolicy() accepts and returns an
+ * array of specific, user-facing problem descriptions — empty means the
+ * patch is safe to persist. Only fields actually present in the patch are
+ * checked, matching setSendPolicy's own partial-merge behavior: a caller
+ * patching just `enabled` is not forced to also resend a valid cap.
+ */
+function validatePolicyPatch(patch) {
+  const errors = [];
+  const value = patch && typeof patch === "object" ? patch : {};
+
+  if (value.enabled !== undefined && typeof value.enabled !== "boolean") {
+    errors.push("enabled must be true or false");
+  }
+  if (value.countManualSends !== undefined && typeof value.countManualSends !== "boolean") {
+    errors.push("countManualSends must be true or false");
+  }
+
+  if (value.maxPerContact !== undefined) {
+    const cap = value.maxPerContact && typeof value.maxPerContact === "object" ? value.maxPerContact : {};
+    if (cap.count !== undefined) {
+      const count = Number(cap.count);
+      if (!Number.isFinite(count) || count <= 0) {
+        errors.push("max-per-contact count must be a positive number");
+      }
+    }
+    if (cap.windowMinutes !== undefined) {
+      const windowMinutes = Number(cap.windowMinutes);
+      if (!Number.isFinite(windowMinutes) || windowMinutes <= 0) {
+        errors.push("max-per-contact window must be a positive number of minutes");
+      }
+    }
+  }
+
+  if (value.quietHours !== undefined) {
+    const quietHours = value.quietHours && typeof value.quietHours === "object" ? value.quietHours : {};
+
+    if (quietHours.window !== undefined && quietHours.window !== null) {
+      const win = quietHours.window && typeof quietHours.window === "object" ? quietHours.window : {};
+      if (!isValidTimeOfDay(win.from) || !isValidTimeOfDay(win.to)) {
+        errors.push("quiet hours window must have valid HH:MM start and end times");
+      } else if (timeToMinutes(win.from) >= timeToMinutes(win.to)) {
+        errors.push("quiet hours window end time must be after its start time");
+      }
+    }
+
+    if (quietHours.tz !== undefined && quietHours.tz !== null && String(quietHours.tz).trim() !== "") {
+      if (!isKnownTimeZone(String(quietHours.tz))) {
+        errors.push(`quiet hours timezone "${quietHours.tz}" is not a recognized timezone`);
+      }
+    }
+  }
+
+  return errors;
+}
+
 module.exports = {
   getSendPolicy,
   setSendPolicy,
   recentSendCount,
+  validatePolicyPatch,
   DEFAULT_POLICY,
 };

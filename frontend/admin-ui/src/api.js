@@ -395,3 +395,27 @@ export function disconnectWhatsApp() {
 export function rotateWebhookSecret() {
   return sendJSON("POST", "/api/integrations/whatsapp/rotate-secret");
 }
+
+// --- Account-wide send policy (task 11, #39) ----------------------------
+// A frequency cap + quiet-hours window enforced across every campaign for
+// one phone number, plus the manual-send toggle — see backend
+// lib/sendPolicy.js. GET always returns a complete, normalized policy;
+// POST is a partial patch validated server-side before it's saved.
+
+export function fetchSendPolicy() {
+  return getJSON("/api/settings/send-policy");
+}
+
+export function updateSendPolicy(patch) {
+  return sendJSON("POST", "/api/settings/send-policy", patch);
+}
+
+// --- Per-node funnel (task 10, task 13/#41) -----------------------------
+// Read-only aggregation for one campaign's one graph version — see
+// routes/messageEvents.js's nodeFunnel for exactly what each count means.
+// `graphVersion` is optional; omitting it lets the backend default to the
+// campaign's live version, same as the endpoint itself does.
+export function fetchNodeFunnel(campaignId, graphVersion) {
+  const query = graphVersion === undefined || graphVersion === null ? "" : `?graphVersion=${encodeURIComponent(graphVersion)}`;
+  return getJSON(`/api/campaigns/${campaignId}/node-funnel${query}`);
+}

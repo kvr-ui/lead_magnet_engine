@@ -1,8 +1,214 @@
 import { useEffect, useState } from "react";
-import { fetchIntegrationStatus, connectWhatsApp, disconnectWhatsApp, rotateWebhookSecret } from "./api";
+import {
+  fetchIntegrationStatus,
+  connectWhatsApp,
+  disconnectWhatsApp,
+  rotateWebhookSecret,
+  fetchSendPolicy,
+  updateSendPolicy,
+} from "./api";
+import WindowScheduleFields from "./WindowScheduleFields";
 
 function emptyChannel() {
   return { id: "", label: "" };
+}
+
+// Turns a fetched/normalized policy (lib/sendPolicy.js) into editable form
+// state. The one deliberate departure from the stored shape: a fresh/unset
+// installation reports maxPerContact.count as 0 (that module's internal
+// sentinel for "no cap configured" — see its comments), which is not a value
+// the cap input should ever show or resubmit, since the route rejects a
+// non-positive count outright. 1/60 are just sane starting values for an
+// operator turning the cap on for the first time; they change nothing while
+// the policy is off.
+function draftFromPolicy(policy) {
+  return {
+    enabled: policy.enabled,
+    maxPerContact: {
+      count: policy.maxPerContact.count || 1,
+      windowMinutes: policy.maxPerContact.windowMinutes || 60,
+    },
+    quietHours: {
+      window: policy.quietHours.window,
+      tz: policy.quietHours.tz || "UTC",
+      skipDays: policy.quietHours.skipDays || [],
+    },
+    countManualSends: policy.countManualSends,
+  };
+}
+
+// Sending policy panel (task 11, #39): read/write UI for the account-wide
+// cap + quiet-hours policy from task 7 (lib/sendPolicy.js). Reuses
+// WindowScheduleFields — the same from/to/timezone/skip-days sub-form the
+// wait node's config uses — for quiet hours, rather than a second copy of
+// those inputs. That component's `window` shape carries `tz` alongside
+// `from`/`to`; the policy stores `tz` one level up, as a sibling of
+// `window`, so it's threaded through here rather than duplicated onto the
+// window object in storage.
+function SendPolicyPanel() {
+  const [draft, setDraft] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  function reload() {
+    setLoading(true);
+    setError(null);
+    fetchSendPolicy()
+      .then((policy) => setDraft(draftFromPolicy(policy)))
+      .catch((err) => setError(err.message))
+      .finally(() => setLoading(false));
+  }
+
+  useEffect(reload, []);
+
+  function set(patch) {
+    setDraft((d) => ({ ...d, ...patch }));
+    setSaved(false);
+  }
+  function setCap(patch) {
+    setDraft((d) => ({ ...d, maxPerContact: { ...d.maxPerContact, ...patch } }));
+    setSaved(false);
+  }
+  // WindowScheduleFields calls this with one-key patches: {from}, {to}, or
+  // {tz} (see NodeConfigPanel.jsx's WaitPanel, which drives the very same
+  // component the same way). tz routes to quietHours.tz directly; from/to
+  // merge onto quietHours.window.
+  function setQuietWindow(patch) {
+    setDraft((d) => {
+      if (Object.prototype.hasOwnProperty.call(patch, "tz")) {
+        return { ...d, quietHours: { ...d.quietHours, tz: patch.tz } };
+      }
+      const current = d.quietHours.window || { from: "", to: "" };
+      return { ...d, quietHours: { ...d.quietHours, window: { ...current, ...patch } } };
+    });
+    setSaved(false);
+  }
+  function toggleSkipDay(day) {
+    setDraft((d) => {
+      const days = d.quietHours.skipDays || [];
+      const next = days.includes(day) ? days.filter((x) => x !== day) : [...days, day].sort((a, b) => a - b);
+      return { ...d, quietHours: { ...d.quietHours, skipDays: next } };
+    });
+    setSaved(false);
+  }
+
+  async function handleSave(e) {
+    e.preventDefault();
+    setError(null);
+    setSaving(true);
+    setSaved(false);
+    try {
+      const win = draft.quietHours.window;
+      // Blank from/blank to means "no time-of-day restriction" — the same
+      // rule lib/sendPolicy.js's normalizeWindow applies — so an untouched
+      // pair of empty inputs is sent as null rather than as an object that
+      // would fail the from/to validity check.
+      const payload = {
+        ...draft,
+        quietHours: {
+          ...draft.quietHours,
+          window: win && (win.from || win.to) ? win : null,
+        },
+      };
+      const next = await updateSendPolicy(payload);
+      setDraft(draftFromPolicy(next));
+      setSaved(true);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (loading || !draft) {
+    return (
+      <div className="panel">
+        <h3>Sending policy</h3>
+        {error ? <p className="error">{error}</p> : <p className="muted">Loading…</p>}
+      </div>
+    );
+  }
+
+  const win = draft.quietHours.window || {};
+
+  return (
+    <form className="panel panel-form" onSubmit={handleSave}>
+      <h3>Sending policy</h3>
+      <p className="muted">
+        Applies across <strong>every</strong> campaign for a contact, not per campaign — one shared cap and one
+        shared quiet-hours window per phone number, however many drips are currently running against it. A send this
+        policy blocks is deferred to the next allowed slot — never dropped, never marked failed.
+      </p>
+
+      <button
+        type="button"
+        className={`switch ${draft.enabled ? "on" : "off"}`}
+        onClick={() => set({ enabled: !draft.enabled })}
+        role="switch"
+        aria-checked={draft.enabled}
+        aria-label="Sending policy"
+        title={
+          draft.enabled
+            ? "The cap and quiet hours below are enforced. Click to turn off."
+            : "Off — no capping and no quiet hours, regardless of the values below. Click to turn on."
+        }
+      >
+        <span className="switch-track">
+          <span className="switch-thumb" />
+        </span>
+        <span className="switch-label">{draft.enabled ? "Policy ON" : "Policy OFF — no capping, no quiet hours"}</span>
+      </button>
+
+      <h4>Max per contact</h4>
+      <label className="form-row">
+        Messages
+        <input
+          type="number"
+          min="1"
+          value={draft.maxPerContact.count}
+          onChange={(e) => setCap({ count: Number(e.target.value) || 0 })}
+        />
+      </label>
+      <label className="form-row">
+        Per (minutes)
+        <input
+          type="number"
+          min="1"
+          value={draft.maxPerContact.windowMinutes}
+          onChange={(e) => setCap({ windowMinutes: Number(e.target.value) || 0 })}
+        />
+      </label>
+
+      <h4>Quiet hours</h4>
+      <p className="muted">Leave the window blank for no time-of-day restriction.</p>
+      <WindowScheduleFields
+        window={{ from: win.from || "", to: win.to || "", tz: draft.quietHours.tz || "" }}
+        skipDays={draft.quietHours.skipDays}
+        onChangeWindow={setQuietWindow}
+        onToggleSkipDay={toggleSkipDay}
+      />
+
+      <h4>Manual sends</h4>
+      <label className="checkbox-row">
+        <input
+          type="checkbox"
+          checked={draft.countManualSends}
+          onChange={(e) => set({ countManualSends: e.target.checked })}
+        />
+        Count one-off manual sends ("Send a message") toward the same cap
+      </label>
+
+      {error && <p className="error">{error}</p>}
+      <div className="form-actions">
+        <button type="submit" disabled={saving}>
+          {saving ? "Saving…" : "Save sending policy"}
+        </button>
+        {saved && <span className="notice">Saved</span>}
+      </div>
+    </form>
+  );
 }
 
 export default function IntegrationsTab() {
@@ -204,6 +410,8 @@ export default function IntegrationsTab() {
           </div>
         </form>
       )}
+
+      <SendPolicyPanel />
     </div>
   );
 }
