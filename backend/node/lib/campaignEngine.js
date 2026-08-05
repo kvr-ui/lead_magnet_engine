@@ -1,5 +1,6 @@
 const Campaign = require("../models/Campaign");
 const CampaignEnrollment = require("../models/CampaignEnrollment");
+const CampaignNodeVisit = require("../models/CampaignNodeVisit");
 const DirectMessage = require("../models/DirectMessage");
 const MessageEvent = require("../models/MessageEvent");
 const { cleanPhone } = require("./phone");
@@ -14,6 +15,10 @@ const { isSendingEnabled } = require("./sendingSwitch");
 // Derived per read from the inbound message log, never stored as a flag — see
 // the header of lib/sessionWindow.js for why.
 const { isWindowOpen } = require("./sessionWindow");
+// Pure retryable/undeliverable/terminal classification for a send failure,
+// plus the backoff schedule that goes with a retryable one — see the header
+// of lib/errorClassification.js.
+const { classify: classifySendError, maxSendAttempts, backoffForAttempt } = require("./errorClassification");
 
 // How many due enrollments to send per poll tick, and the gap between sends —
 // keeps us well under the connected provider's rate limits instead of firing
@@ -856,9 +861,12 @@ function renderText(node, doc) {
 
 function emptyResult() {
   return {
-    // How the tick ended: "sent", "acted", "waiting", "completed", "paused",
-    // "failed", or "gated" (the kill switch or the allowlist refused the send
-    // or the action, so nothing at all is applied to the enrollment).
+    // How the tick ended: "sent", "acted", "waiting", "retrying", "completed",
+    // "paused", "failed", or "gated" (the kill switch or the allowlist refused
+    // the send or the action, so nothing at all is applied to the enrollment).
+    // "retrying" joins "gated"/"waiting" as a stop that leaves status alone —
+    // see the message node's catch block for how a retryable send failure
+    // under budget reaches it.
     stop: null,
     reason: null,
     reasonCode: null,
@@ -870,6 +878,14 @@ function emptyResult() {
     // unlabelled exit downstream can inherit the conversion. Walk-local: it is
     // never written to the enrollment, only folded into exitOutcome.
     goalOutcome: null,
+    // Left undefined (not written) on every tick that never reaches a message
+    // node's send attempt. Set to a number by the message node on every send
+    // attempt - the incremented streak on failure, 0 on success - and to the
+    // classification string ("retryable"/"undeliverable"/"terminal") or null
+    // (also on success) alongside it. See applyWalkResult's two conditional
+    // writes for why undefined, specifically, is what "don't touch this" means.
+    sendAttempts: undefined,
+    lastAttemptClass: undefined,
     history: [],
     visited: [],
     path: [],
@@ -1255,14 +1271,6 @@ async function runWalk(enrollment, campaign, ctx) {
 
         attempt.status = "error";
         attempt.error = err.message;
-        result.history.push({
-          nodeId: node.id,
-          messageType,
-          templateId: config.templateId,
-          sentAt: ctx.now,
-          status: "error",
-          error: err.message,
-        });
 
         // A closed conversation window is not a broken flow and not a provider
         // outage — it is a lead who hasn't spoken to us lately, and Meta
@@ -1278,6 +1286,14 @@ async function runWalk(enrollment, campaign, ctx) {
         // "conversation window" condition in front of this node so the flow
         // routes closed-window leads to a template instead of parking at all.
         if (err.windowClosed) {
+          result.history.push({
+            nodeId: node.id,
+            messageType,
+            templateId: config.templateId,
+            sentAt: ctx.now,
+            status: "error",
+            error: err.message,
+          });
           result.currentNodeId = node.id;
           return park(
             result,
@@ -1287,7 +1303,63 @@ async function runWalk(enrollment, campaign, ctx) {
           );
         }
 
-        return park(result, "failed", err.message);
+        // Everything else is a genuine send failure — a provider rejection or
+        // the network never delivering the request at all — classified off the
+        // structured fields lib/watiClient.js attaches at its throw site, never
+        // off this message string (see lib/errorClassification.js).
+        const sendErrorClass = classifySendError(err);
+        const attemptNumber = (Number(enrollment.sendAttempts) || 0) + 1;
+        const attemptBudget = maxSendAttempts();
+        result.sendAttempts = attemptNumber;
+        result.lastAttemptClass = sendErrorClass;
+
+        if (sendErrorClass === "retryable" && attemptNumber < attemptBudget) {
+          // Still under budget: leave the lead active and due again after the
+          // backoff for this attempt number, instead of parking it. currentNodeId
+          // is set explicitly rather than left as whatever it was, because
+          // decision nodes may already have chained ahead of this one earlier
+          // in this same tick.
+          const attemptDetail = `attempt ${attemptNumber}/${attemptBudget}`;
+          result.history.push({
+            nodeId: node.id,
+            messageType,
+            templateId: config.templateId,
+            sentAt: ctx.now,
+            status: "error",
+            error: err.message,
+            detail: attemptDetail,
+          });
+          result.currentNodeId = node.id;
+          result.nextSendAt = new Date(ctx.now.getTime() + backoffForAttempt(attemptNumber));
+          result.stop = "retrying";
+          result.reason = `message node "${node.id}" ${attemptDetail} (${sendErrorClass}): ${err.message}`;
+          return result;
+        }
+
+        // Terminal, undeliverable, or the retry budget is exhausted: park for
+        // good, exactly as every send failure used to be treated, but with a
+        // reason that names the attempt count and the classification instead
+        // of just the provider's message.
+        //
+        // An `undeliverable` classification deliberately does NOT call
+        // recordOptOut here. A delivery failure is not the customer asking to
+        // stop, and auto-unsubscribing them across every campaign on the
+        // strength of a provider error code is a one-way action an operator
+        // should make deliberately, not something a poll tick decides alone.
+        result.history.push({
+          nodeId: node.id,
+          messageType,
+          templateId: config.templateId,
+          sentAt: ctx.now,
+          status: "error",
+          error: err.message,
+        });
+        result.currentNodeId = node.id;
+        return park(
+          result,
+          "failed",
+          `message node "${node.id}" failed permanently after ${attemptNumber} attempt(s) (${sendErrorClass}): ${err.message}`
+        );
       }
 
       const providerMessageId = extractSentMessageId(sendResult);
@@ -1318,6 +1390,10 @@ async function runWalk(enrollment, campaign, ctx) {
       result.stop = "sent";
       result.currentNodeId = next;
       result.nextSendAt = ctx.now;
+      // A send that landed ends whatever retry streak this node was on, so it
+      // doesn't leak into the next node's own attempts at this enrollment.
+      result.sendAttempts = 0;
+      result.lastAttemptClass = null;
       return result;
     }
 
@@ -1355,6 +1431,15 @@ async function applyWalkResult(enrollment, result, { persist }) {
   if (result.status) enrollment.status = result.status;
   if (result.nextSendAt) enrollment.nextSendAt = result.nextSendAt;
   if (result.exitOutcome) enrollment.outcome = result.exitOutcome;
+  // The message node's send-attempt streak. Undefined means "this tick never
+  // reached a send attempt" and leaves the counters exactly as they were -
+  // the same "undefined means don't touch it" rule currentNodeId above
+  // follows. Unlike currentNodeId, null is a meaningful value here (not just
+  // "absent"): a successful send resets lastAttemptClass to null on purpose,
+  // so it must be written, not skipped the way `if (result.exitOutcome)`
+  // would skip it.
+  if (result.sendAttempts !== undefined) enrollment.sendAttempts = result.sendAttempts;
+  if (result.lastAttemptClass !== undefined) enrollment.lastAttemptClass = result.lastAttemptClass;
   // Cleared on a clean tick so a stale "why did this stop" can't outlive the
   // condition that caused it. The code has the same lifetime as the prose.
   enrollment.statusReason = result.reason || null;
@@ -1440,6 +1525,49 @@ async function walkEnrollment(enrollment, campaign, options = {}) {
     console.error(`[campaignEngine] could not save enrollment ${enrollment._id}:`, err.message);
     result.saveError = err.message;
   }
+
+  // Fire-and-forget: persist every node this tick passed through, including
+  // the decision kinds (filter/condition/split/goal/wait/source/exit) that
+  // leave no history entry of their own - result.visited is otherwise thrown
+  // away once the hop-limit message is built. Never awaited, so analytics can
+  // never delay the walk, and any failure is caught and logged here rather
+  // than surfaced - it must never affect the walk's result or the enrollment.
+  // Skipped on a dry run so "zero outbound side effects" stays literally true.
+  if (!dryRun && Array.isArray(result.visited) && result.visited.length) {
+    try {
+      const visitedAt = ctx.now;
+      const ops = result.visited.map((step) => ({
+        updateOne: {
+          filter: {
+            campaign: campaign._id,
+            graphVersion: enrollment.graphVersion,
+            nodeId: step.nodeId,
+            enrollment: enrollment._id,
+          },
+          update: {
+            $setOnInsert: {
+              campaign: campaign._id,
+              graphVersion: enrollment.graphVersion,
+              nodeId: step.nodeId,
+              enrollment: enrollment._id,
+              firstVisitedAt: visitedAt,
+            },
+          },
+          upsert: true,
+        },
+      }));
+      // Not awaited on purpose (see comment above) - wrapped in try/catch too,
+      // not just .catch(), so that even a synchronous throw building or
+      // issuing the bulkWrite (as opposed to an async rejection) can't escape
+      // into the walk.
+      CampaignNodeVisit.bulkWrite(ops, { ordered: false }).catch((err) => {
+        console.error(`[campaignEngine] could not record node visits for enrollment ${enrollment._id}:`, err.message);
+      });
+    } catch (err) {
+      console.error(`[campaignEngine] could not record node visits for enrollment ${enrollment._id}:`, err.message);
+    }
+  }
+
   return result;
 }
 
