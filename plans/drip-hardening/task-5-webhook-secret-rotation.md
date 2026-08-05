@@ -3,7 +3,7 @@ task: 5
 name: webhook-secret-rotation
 parallel_group: 2
 depends_on: [1]
-issue:
+issue: 33
 ---
 
 # Task 5: Rotate the webhook secret from the Integrations tab

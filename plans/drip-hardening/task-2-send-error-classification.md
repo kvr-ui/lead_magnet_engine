@@ -3,7 +3,7 @@ task: 2
 name: send-error-classification
 parallel_group: 1
 depends_on: []
-issue:
+issue: 30
 ---
 
 # Task 2: Classify send errors and retry with backoff

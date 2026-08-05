@@ -3,7 +3,7 @@ task: 10
 name: funnel-endpoint
 parallel_group: 2
 depends_on: [4]
-issue:
+issue: 38
 ---
 
 # Task 10: Per-node funnel aggregation endpoint

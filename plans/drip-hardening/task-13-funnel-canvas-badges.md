@@ -3,7 +3,7 @@ task: 13
 name: funnel-canvas-badges
 parallel_group: 3
 depends_on: [10]
-issue:
+issue: 41
 ---
 
 # Task 13: Funnel badges on the flow canvas

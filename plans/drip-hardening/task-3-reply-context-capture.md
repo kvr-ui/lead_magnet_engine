@@ -3,7 +3,7 @@ task: 3
 name: reply-context-capture
 parallel_group: 1
 depends_on: []
-issue:
+issue: 31
 ---
 
 # Task 3: Capture reply-context id and interactive type on MessageEvent

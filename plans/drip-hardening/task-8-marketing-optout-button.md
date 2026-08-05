@@ -3,7 +3,7 @@ task: 8
 name: marketing-optout-button
 parallel_group: 2
 depends_on: [3]
-issue:
+issue: 36
 ---
 
 # Task 8: Route the marketing opt-out button into OptOut

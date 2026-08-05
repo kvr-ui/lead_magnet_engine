@@ -3,7 +3,7 @@ task: 11
 name: send-policy-ui
 parallel_group: 3
 depends_on: [7]
-issue:
+issue: 39
 ---
 
 # Task 11: Send-policy admin UI
