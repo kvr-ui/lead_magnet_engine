@@ -166,4 +166,36 @@ export function describeFilter(filter) {
   return parts.length ? parts.join(" · ") : "everyone in this source";
 }
 
+// The same job as describeFilter, for the shape a campaign *stores* once
+// auto-enroll is armed. That is no longer a bare Mongo filter: /enroll writes
+// `{ graphVersion, confirmedAt, sources: [{ nodeId, sourceId, filter }] }` —
+// one entry per source node of the graph it confirmed, because a graph can
+// enrol from several sources at once and "the segment" is their union.
+//
+// Handing that object to describeFilter is what produced the nonsense the
+// status strip used to show ("graphVersion is 3 · sources is [object
+// Object]"): every top-level key was read as a field name. Rather than
+// teaching describeFilter about a shape that isn't a filter, this wraps it and
+// calls it per source, where it is correct.
+//
+// Rows armed before the graph migration stored a flat Mongo filter here, so
+// anything without a `sources` array is still passed straight through — an old
+// campaign should read as what it actually repeats, not as "no segment".
+export function describeAutoEnrollFilter(autoEnrollFilter, sourceLabels = {}) {
+  if (!autoEnrollFilter || typeof autoEnrollFilter !== "object") return "no segment stored";
+  const sources = autoEnrollFilter.sources;
+  if (!Array.isArray(sources)) return describeFilter(autoEnrollFilter);
+  if (!sources.length) return "no segment stored";
+
+  return sources
+    .map((s) => {
+      const label = sourceLabels[s.sourceId] || s.sourceId || "an unnamed source";
+      const filter = s.filter || {};
+      // describeFilter's empty case already reads "everyone in this source",
+      // which would repeat the source name if appended with "where".
+      return Object.keys(filter).length ? `${label} where ${describeFilter(filter)}` : `everyone in ${label}`;
+    })
+    .join("; ");
+}
+
 export default FilterCondition;

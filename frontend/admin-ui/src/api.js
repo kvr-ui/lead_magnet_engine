@@ -104,15 +104,22 @@ export function fetchFilterValues(source, field) {
   return getJSON(`/api/campaigns/meta/values?${params.toString()}`);
 }
 
-export function previewCampaignSend(id, filter) {
-  return sendJSON("POST", `/api/campaigns/${id}/preview`, { filter });
+// Neither of these takes a filter any more, and passing one is not merely
+// redundant — the endpoint rejects it (see assertNoBodyFilter in
+// routes/campaigns.js). Since campaigns became graphs, who gets enrolled is
+// the union of every source node's own `config.filter` on the *published*
+// version, so the only thing the caller can still decide is whether to arm
+// auto-enroll. Both resolve the live version server-side, which is why the
+// campaign id is the whole request.
+export function previewCampaignSend(id) {
+  return sendJSON("POST", `/api/campaigns/${id}/preview`, {});
 }
 
-// autoEnroll stores this filter as the campaign's standing segment, so the
-// backend keeps re-running it and targets added to the source later still
-// join the drip instead of needing another manual send.
-export function enrollCampaign(id, filter, autoEnroll = false) {
-  return sendJSON("POST", `/api/campaigns/${id}/enroll`, { filter, autoEnroll });
+// autoEnroll stores the segment this run confirmed as the campaign's standing
+// one, so the backend keeps re-running it and targets added to a source later
+// still join the drip instead of needing another manual send.
+export function enrollCampaign(id, autoEnroll = false) {
+  return sendJSON("POST", `/api/campaigns/${id}/enroll`, { autoEnroll });
 }
 
 // `limit` is optional and defaults to whatever the endpoint defaults to

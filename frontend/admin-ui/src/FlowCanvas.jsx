@@ -629,6 +629,15 @@ function FlowCanvasInner({
     return (first && first.data.config.sourceId) || (sources[0] && sources[0].value) || "Contact";
   }, [nodes, sources]);
 
+  // Every message node in the graph, for a condition node's engagement case to
+  // name. Deliberately not narrowed to nodes upstream of the selected one: a
+  // graph here may loop, so a reachability guess would hide valid choices. A
+  // reference that can never have sent is caught by validateGraph instead.
+  const messageNodes = useMemo(
+    () => nodes.filter((n) => n.data.kind === "message").map((n) => ({ id: n.id, label: n.data.label })),
+    [nodes]
+  );
+
   const canonicalKeySuggestions = useMemo(() => {
     const keys = new Set(["phone", "name", "email"]);
     nodes.forEach((n) => {
@@ -813,6 +822,7 @@ function FlowCanvasInner({
             key={selectedDomainNode.id}
             node={selectedDomainNode}
             sources={sources}
+            messageNodes={messageNodes}
             defaultFilterSource={defaultFilterSource}
             canonicalKeySuggestions={canonicalKeySuggestions}
             onChangeLabel={(label) => updateSelectedNode({ label })}

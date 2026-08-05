@@ -93,6 +93,48 @@ function hasActionTarget(config) {
   return Boolean(config.url) || Boolean(config.field);
 }
 
+// Mirrors campaignEngine.js's evaluateEngagement(), which accepts three
+// spellings of the message it asks about and two of the status.
+function engagementNodeIdOf(config) {
+  return config.nodeId || config.messageNodeId || config.node || "";
+}
+
+function engagementStatusOf(config) {
+  return String(config.status || config.event || "").toLowerCase();
+}
+
+// ENGAGEMENT_STATUSES in campaignEngine.js. A status outside this set makes
+// evaluateEngagement throw, which parks the lead.
+const ENGAGEMENT_STATUSES = new Set(["sent", "delivered", "read", "replied", "failed"]);
+
+/**
+ * Can `fromId` be reached backwards from `toId` without passing a wait node?
+ *
+ * Used for the one engagement mistake that produces no error at all: checking
+ * a delivery status in the same breath as the send. Delivery and reply events
+ * arrive asynchronously over the webhook, so a condition with no wait between
+ * it and its message finds nothing and routes every lead down "no" — a flow
+ * that looks like it ran correctly and reports that nobody engaged.
+ *
+ * Traversal stops at wait nodes rather than marking them visited: a path that
+ * goes through one is fine, and only a wait-free path is worth reporting.
+ */
+function reachableWithoutWait(toId, fromId, incomingByNode, firstNodeById) {
+  const seen = new Set([toId]);
+  const queue = [toId];
+  while (queue.length) {
+    for (const prev of incomingByNode.get(queue.shift()) || []) {
+      if (prev === fromId) return true;
+      if (seen.has(prev)) continue;
+      seen.add(prev);
+      const node = firstNodeById(prev);
+      if (node && node.kind === "wait") continue;
+      queue.push(prev);
+    }
+  }
+  return false;
+}
+
 /**
  * Inspect a campaign flow graph and report what's wrong with it.
  *
@@ -158,6 +200,15 @@ export function validateGraph(graph) {
   const hasOutboundEdge = new Set(edges.filter((e) => e && e.from).map((e) => e.from));
   const hasInboundEdge = new Set(edges.filter((e) => e && e.to).map((e) => e.to));
 
+  // to -> [from], for walking the graph backwards from a condition node to the
+  // message it asks about.
+  const incomingByNode = new Map();
+  for (const edge of edges) {
+    if (!edge || !edge.from || !edge.to) continue;
+    if (!incomingByNode.has(edge.to)) incomingByNode.set(edge.to, []);
+    incomingByNode.get(edge.to).push(edge.from);
+  }
+
   let sourceCount = 0;
   for (const node of nodes) {
     if (!node || node.kind !== "source") continue;
@@ -222,6 +273,54 @@ export function validateGraph(graph) {
           if (isBlank(config.value)) {
             pushWarning(warnings, node, `Condition "${name}" has no value set.`);
           }
+        }
+
+        if (on === "engagement") {
+          const messageId = engagementNodeIdOf(config);
+          const status = engagementStatusOf(config);
+          const referenced = messageId ? firstNodeById(messageId) : undefined;
+
+          if (!messageId) {
+            pushWarning(warnings, node, `Condition "${name}" names no message to ask about.`);
+          } else if (!referenced) {
+            // The quiet failure this whole case exists for: evaluateEngagement
+            // returns false when the named node has nothing in the enrollment's
+            // history, so a stale reference sends *every* lead down "no" and
+            // reads as "nobody replied" rather than as a broken flow.
+            pushWarning(
+              warnings,
+              node,
+              `Condition "${name}" asks about a message that is no longer in this flow, so every lead will take the "no" branch.`
+            );
+          } else if (referenced.kind !== "message") {
+            pushWarning(
+              warnings,
+              node,
+              `Condition "${name}" asks about "${displayName(referenced)}", which is a ${referenced.kind} node and never sends anything — every lead will take the "no" branch.`
+            );
+          } else if (reachableWithoutWait(node.id, messageId, incomingByNode, firstNodeById)) {
+            pushWarning(
+              warnings,
+              node,
+              `Condition "${name}" checks "${displayName(referenced)}" with no wait in between. Delivery and reply events arrive after the send, so every lead will take the "no" branch — add a wait node.`
+            );
+          }
+
+          if (!status) {
+            pushWarning(warnings, node, `Condition "${name}" has no delivery status set.`);
+          } else if (!ENGAGEMENT_STATUSES.has(status)) {
+            pushWarning(warnings, node, `Condition "${name}" asks about an unsupported delivery status "${status}".`);
+          }
+        }
+
+        if (on === "activity" && isBlank(config.threshold === undefined ? config.count : config.threshold)) {
+          pushWarning(warnings, node, `Condition "${name}" has no activity threshold set.`);
+        }
+
+        if (on === "elapsed" && !Number(config.days) && !Number(config.hours)) {
+          // Zero elapsed time is true the moment a lead arrives, so the "no"
+          // branch is dead and the node decides nothing.
+          pushWarning(warnings, node, `Condition "${name}" has no time set, so every lead takes the "yes" branch.`);
         }
         break;
       }

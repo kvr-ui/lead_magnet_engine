@@ -355,17 +355,249 @@ function WaitPanel({ node, onChangeConfig }) {
   );
 }
 
-// condition node: in-scope case only ("field") - the same filter shape as a
-// filter node, evaluated by the walker to pick the yes/no branch.
-function ConditionPanel({ node, defaultFilterSource, onChangeConfig }) {
+// condition node: `config.on` picks which of four questions the node asks, and
+// evaluateCondition() in lib/campaignEngine.js dispatches on it. Each kind
+// reads its own keys:
+//
+//   field      { filter }             - compare the lead record, the same
+//                                       Mongo-ish shape a filter node writes
+//   engagement { nodeId, status }     - did one specific message land, get read,
+//                                       or get answered
+//   activity   { metric, threshold }  - did they use the lead magnet since we
+//                                       last messaged them
+//   elapsed    { since, days, hours } - how long since the drip started, or
+//                                       since the last send
+//
+// Only "field" had a form before. The other three were implemented in the
+// walker but unreachable from the canvas, which is what made a follow-up that
+// chases only the leads who *didn't* reply impossible to build here.
+const CONDITION_KINDS = [
+  { value: "field", label: "Lead field", hint: "compare a field on the lead record" },
+  { value: "engagement", label: "Message engagement", hint: "did a message land, get read, or get a reply" },
+  { value: "activity", label: "Product activity", hint: "did they use the lead magnet" },
+  { value: "elapsed", label: "Time elapsed", hint: "how long since the drip started" },
+];
+
+// ENGAGEMENT_STATUSES in lib/campaignEngine.js, in funnel order. Each names a
+// normalized MessageEvent status the WATI webhook records. A condition asks
+// about exactly one of them, so "read or replied" is two chained conditions
+// rather than a multi-select - which is why the copy below names the single
+// status rather than talking about engagement in general.
+const ENGAGEMENT_STATUSES = [
+  { value: "sent", label: "Sent", hint: "handed to the provider" },
+  { value: "delivered", label: "Delivered", hint: "reached the handset" },
+  { value: "read", label: "Read", hint: "opened by the lead" },
+  { value: "replied", label: "Replied", hint: "the lead answered it" },
+  { value: "failed", label: "Failed", hint: "Meta rejected it, or it could not be delivered" },
+];
+
+// Shared by the condition node's "activity" case and the goal node below: both
+// read the same rollup from lib/leadActivity.js, so they must offer the same
+// metrics or the two would disagree about what counts as activity.
+const ACTIVITY_METRICS = [
+  { value: "count", label: "Activity rows", hint: "anything the lead did" },
+  { value: "correct", label: "Correct answers", hint: "rows flagged correct" },
+  { value: "graded", label: "Graded answers", hint: "rows that were marked at all" },
+];
+
+const ELAPSED_SINCE = [
+  { value: "start", label: "the enrollment started" },
+  { value: "lastsend", label: "the last message we sent" },
+];
+
+// evaluateEngagement() accepts older spellings of both its keys. Read all of
+// them so a graph written by hand still opens with its selection intact, and
+// write only the canonical `nodeId` / `status` back.
+function engagementNodeIdOf(config) {
+  return config.nodeId || config.messageNodeId || config.node || "";
+}
+
+function engagementStatusOf(config) {
+  return String(config.status || config.event || "").toLowerCase();
+}
+
+function ConditionPanel({ node, messageNodes, defaultFilterSource, onChangeConfig }) {
   const config = node.config || {};
-  function setFilter(filter) {
-    onChangeConfig({ ...config, on: "field", filter });
+  const on = String(config.on || "field").toLowerCase();
+
+  function set(patch) {
+    onChangeConfig({ ...config, ...patch });
   }
+
+  // Only the discriminator changes, exactly as ActionPanel's setMode does and
+  // for the same reason: the walker dispatches on `on` alone, so the other
+  // kinds' keys are inert, and leaving them in place means switching away and
+  // back doesn't discard a filter that was already built.
+  function setKind(next) {
+    // Except for engagement's status, which is defaulted on arrival rather than
+    // left blank: a status is required, and "replied" is the one this node
+    // exists to ask about.
+    if (next === "engagement" && !engagementStatusOf(config)) return set({ on: next, status: "replied" });
+    set({ on: next });
+  }
+
+  const selectedMessage = engagementNodeIdOf(config);
+  // A reference to a node that no longer exists must stay visible rather than
+  // letting the select silently snap to the first message node - which would
+  // read as a valid configuration nobody chose. Kept as an explicit option, and
+  // warned about by validateGraph.
+  const messageMissing = Boolean(selectedMessage) && !messageNodes.some((m) => m.id === selectedMessage);
+
   return (
     <div>
-      <p className="muted">Leads matching this filter take the "yes" branch; everyone else takes "no".</p>
-      <FilterEditor key={node.id} source={defaultFilterSource} filter={config.filter} onChange={setFilter} />
+      <label className="form-row">
+        Ask about
+        <select value={on} onChange={(e) => setKind(e.target.value)}>
+          {CONDITION_KINDS.map((k) => (
+            <option key={k.value} value={k.value}>
+              {k.label} — {k.hint}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      {on === "field" && (
+        <div>
+          <p className="muted">Leads matching this filter take the “yes” branch; everyone else takes “no”.</p>
+          <FilterEditor
+            key={node.id}
+            source={defaultFilterSource}
+            filter={config.filter}
+            onChange={(filter) => set({ filter })}
+          />
+        </div>
+      )}
+
+      {on === "engagement" && (
+        <div>
+          <p className="muted">
+            Asks about one earlier message. Leads whose message reached the chosen status take the “yes” branch;
+            everyone else takes “no”.
+          </p>
+
+          <label className="form-row">
+            Message
+            <select value={selectedMessage} onChange={(e) => set({ nodeId: e.target.value })}>
+              <option value="">— pick a message node —</option>
+              {messageMissing && <option value={selectedMessage}>{selectedMessage} (no longer in this flow)</option>}
+              {messageNodes.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label || m.id}
+                </option>
+              ))}
+            </select>
+            <span className="muted">
+              Answered per message, not per phone number: it checks the provider's id for that specific send, so a reply
+              to an earlier message doesn't count as a reply to this one.
+            </span>
+          </label>
+
+          <label className="form-row">
+            Reached status
+            <select value={engagementStatusOf(config) || "replied"} onChange={(e) => set({ status: e.target.value })}>
+              {ENGAGEMENT_STATUSES.map((s) => (
+                <option key={s.value} value={s.value}>
+                  {s.label} — {s.hint}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <p className="muted">
+            Put a <strong>wait</strong> node between that message and this one. Delivery and reply events arrive
+            afterwards over the webhook, so a condition evaluated straight after a send finds nothing and routes
+            everyone down “no”.
+          </p>
+          <p className="muted">
+            Numbers Meta refused come back as <em>Failed</em>, and never received the message at all. Branching those
+            separately keeps them out of a follow-up meant for leads who saw it and stayed quiet.
+          </p>
+        </div>
+      )}
+
+      {on === "activity" && (
+        <div>
+          <p className="muted">
+            Leads who cleared the threshold take the “yes” branch; everyone else takes “no”. Only activity recorded{" "}
+            <em>after the last message this campaign sent them</em> counts.
+          </p>
+
+          <label className="form-row">
+            Measure
+            <select value={config.metric || "count"} onChange={(e) => set({ metric: e.target.value })}>
+              {ACTIVITY_METRICS.map((m) => (
+                <option key={m.value} value={m.value}>
+                  {m.label} — {m.hint}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="form-row">
+            At least
+            <input
+              type="number"
+              min="1"
+              placeholder="1"
+              value={config.threshold === undefined || config.threshold === null ? "" : config.threshold}
+              onChange={(e) => set({ threshold: e.target.value === "" ? undefined : Number(e.target.value) })}
+            />
+          </label>
+
+          <p className="muted">
+            Needs a connected data source with an activity config (Data Sources tab). Without one this node can't answer
+            its own question, so leads reaching it are parked rather than routed down “no”.
+          </p>
+        </div>
+      )}
+
+      {on === "elapsed" && (
+        <div>
+          <p className="muted">
+            Leads for whom at least this much time has passed take the “yes” branch; everyone else takes “no”.
+          </p>
+
+          <label className="form-row">
+            Measured since
+            <select value={config.since === "lastsend" ? "lastsend" : "start"} onChange={(e) => set({ since: e.target.value })}>
+              {ELAPSED_SINCE.map((s) => (
+                <option key={s.value} value={s.value}>
+                  {s.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <div className="form-row">
+            <span>At least</span>
+            <div className="value-chip-row">
+              <label className="checkbox-row">
+                <input
+                  type="number"
+                  min="0"
+                  placeholder="0"
+                  value={config.days === undefined || config.days === null ? "" : config.days}
+                  onChange={(e) => set({ days: e.target.value === "" ? undefined : Number(e.target.value) })}
+                />
+                days
+              </label>
+              <label className="checkbox-row">
+                <input
+                  type="number"
+                  min="0"
+                  placeholder="0"
+                  value={config.hours === undefined || config.hours === null ? "" : config.hours}
+                  onChange={(e) => set({ hours: e.target.value === "" ? undefined : Number(e.target.value) })}
+                />
+                hours
+              </label>
+            </div>
+            <span className="muted">
+              Both left empty means no delay at all, which is true for every lead the moment they arrive.
+            </span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -449,12 +681,10 @@ function SplitPanel({ node, onChangeConfig }) {
 // outcome?: String }. Everything counted is activity *since the last send to
 // this lead*, which is what makes the answer attributable to this drip rather
 // than to whatever the lead was doing anyway.
-const GOAL_METRICS = [
-  { value: "count", label: "Activity rows", hint: "anything the lead did" },
-  { value: "correct", label: "Correct answers", hint: "rows flagged correct" },
-  { value: "graded", label: "Graded answers", hint: "rows that were marked at all" },
-];
-
+//
+// Shares ACTIVITY_METRICS with the condition node's "activity" case: the two
+// read the same rollup, so offering different metrics would let one answer a
+// question the other cannot.
 function GoalPanel({ node, onChangeConfig }) {
   const config = node.config || {};
   const metric = config.metric || "count";
@@ -484,7 +714,7 @@ function GoalPanel({ node, onChangeConfig }) {
       <label className="form-row">
         Measure
         <select value={metric} onChange={(e) => set({ metric: e.target.value })}>
-          {GOAL_METRICS.map((m) => (
+          {ACTIVITY_METRICS.map((m) => (
             <option key={m.value} value={m.value}>
               {m.label} — {m.hint}
             </option>
@@ -734,6 +964,10 @@ const IN_SCOPE_KINDS = ["source", "filter", "message", "wait", "condition", "spl
 export default function NodeConfigPanel({
   node,
   sources,
+  // Every `message` node in the graph, as { id, label } - what a condition
+  // node's engagement case picks from. Narrower than the whole node list on
+  // purpose: it is the only cross-node reference any panel makes.
+  messageNodes = [],
   defaultFilterSource,
   canonicalKeySuggestions,
   onChangeLabel,
@@ -781,7 +1015,12 @@ export default function NodeConfigPanel({
       )}
       {node.kind === "wait" && <WaitPanel node={node} onChangeConfig={onChangeConfig} />}
       {node.kind === "condition" && (
-        <ConditionPanel node={node} defaultFilterSource={defaultFilterSource} onChangeConfig={onChangeConfig} />
+        <ConditionPanel
+          node={node}
+          messageNodes={messageNodes}
+          defaultFilterSource={defaultFilterSource}
+          onChangeConfig={onChangeConfig}
+        />
       )}
       {node.kind === "split" && <SplitPanel node={node} onChangeConfig={onChangeConfig} />}
       {node.kind === "goal" && <GoalPanel node={node} onChangeConfig={onChangeConfig} />}

@@ -1864,3 +1864,172 @@ select:focus-visible {
   color: var(--text-primary);
   font-size: 0.875rem;
 }
+
+/* --- Audience & Send panel ---------------------------------------------
+   The read-only launchpad that replaced the old "Build a segment" builder
+   (see AudienceSendPanel.jsx for why the builder had to go). Everything here
+   is layout over the existing tokens — the counts reuse .muted/.error, the
+   draft-mismatch banner reuses .notice, and the buttons are the global ones. */
+
+.audience-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+}
+
+.audience-draft-notice {
+  margin-bottom: 1rem;
+}
+
+.audience-draft-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-top: 0.6rem;
+}
+
+/* One card per source node of the published graph. */
+.audience-source-card {
+  background: var(--bg-inset);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  padding: 0.875rem 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.audience-source-head {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin-bottom: 0.6rem;
+}
+
+.audience-source-head h4 {
+  margin: 0;
+}
+
+.audience-source-empty {
+  margin: 0;
+}
+
+.audience-counts {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+/* The one number the whole card exists to deliver. */
+.audience-count-headline strong {
+  font-size: 1.25rem;
+  color: var(--text-primary);
+}
+
+/* Skipped/already-enrolled rows. Only non-zero ones are rendered, so this
+   list is empty far more often than not — hence no heading above it. */
+.audience-skip-list {
+  list-style: none;
+  margin: 0.5rem 0 0.6rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+}
+
+.audience-skip-count {
+  display: inline-block;
+  min-width: 2.25rem;
+  text-align: right;
+  margin-right: 0.4rem;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.audience-members {
+  margin-top: 0.6rem;
+}
+
+.audience-total {
+  margin: 0.25rem 0 1rem;
+  font-size: 1rem;
+}
+
+.audience-total strong {
+  font-size: 1.25rem;
+  color: var(--text-primary);
+}
+
+/* Send-once vs keep-running. A fieldset rather than two loose radios so the
+   whole group can be disabled in one place while a send is in flight. */
+.audience-run-choice {
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  padding: 0.75rem 1rem;
+  margin: 0 0 0.25rem;
+}
+
+.audience-run-choice legend {
+  padding: 0 0.4rem;
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+}
+
+.audience-run-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.4rem 0;
+  cursor: pointer;
+}
+
+.audience-run-option > span {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.audience-run-option input {
+  margin-top: 0.25rem;
+}
+
+/* Shown instead of the count cards when /preview refuses outright — a
+   never-published campaign, a source node wired to nothing. The backend's own
+   message is the body, so nothing here restates it. */
+.audience-blocked {
+  background: var(--bg-inset);
+  border: 1px solid var(--danger-soft);
+  border-left: 3px solid var(--danger);
+  border-radius: var(--radius-md);
+  padding: 1rem 1.25rem;
+}
+
+.audience-blocked h4 {
+  margin: 0 0 0.5rem;
+  color: var(--danger);
+}
+
+.audience-blocked p {
+  margin: 0 0 0.75rem;
+}
+
+.audience-success {
+  background: var(--bg-inset);
+  border: 1px solid var(--border-soft);
+  border-left: 3px solid var(--success);
+  border-radius: var(--radius-md);
+  padding: 1rem 1.25rem;
+}
+
+.audience-success h4 {
+  margin: 0 0 0.5rem;
+  color: var(--success);
+}
+
+.audience-success p {
+  margin: 0 0 0.6rem;
+}

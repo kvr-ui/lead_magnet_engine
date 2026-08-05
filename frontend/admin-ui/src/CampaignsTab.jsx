@@ -6,29 +6,20 @@ import {
   updateCampaign,
   deleteCampaign,
   duplicateCampaign,
-  fetchSegmentMembers,
   fetchTemplates,
   fetchChannels,
-  previewCampaignSend,
-  enrollCampaign,
   fetchEnrollments,
   fetchCampaignSources,
-  fetchFilterFields,
   fetchActivitySummary,
 } from "./api";
 import LeadsTable from "./LeadsTable";
 import Pager from "./Pager";
-import FilterCondition, { buildMongoFilter } from "./FilterBuilder";
 import { DeliveryFunnel, DeliveryCell, EnrollmentTimeline } from "./MessageDelivery";
 import CampaignActivity from "./LeadActivity";
 import FlowCanvas from "./FlowCanvas";
 import CampaignStatus from "./CampaignStatus";
+import AudienceSendPanel from "./AudienceSendPanel";
 import ConfirmDialog from "./ConfirmDialog";
-
-function humanizeKey(key) {
-  const spaced = key.replace(/([a-z0-9])([A-Z])/g, "$1 $2");
-  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
-}
 
 /**
  * What to call a campaign's source in the list.
@@ -44,68 +35,6 @@ function campaignSourceLabel(campaign, sourceLabels) {
   const named = ids.filter(Boolean).map((id) => sourceLabels[id] || id);
   if (!named.length) return <span className="muted">No source yet</span>;
   return named.join(", ");
-}
-
-/**
- * Preview/segment table columns for *any* source, built from what the backend
- * reports about that source rather than from a per-source list written here.
- *
- * Two inputs, in this order:
- *
- *   1. The canonical keys the campaign's source node maps (`phone`, `name`,
- *      whatever else it declared). These come first because they are the keys
- *      every downstream node addresses a lead by, so they are the ones an
- *      admin is actually reasoning about. Each reads the raw field the map
- *      points at, so the column header says "Phone" while the value comes off
- *      whatever the source calls it (`phoneNumber`, `mobile`, …).
- *   2. Every remaining field the source actually has, per
- *      /api/campaigns/meta/fields, minus the ones already shown as a canonical
- *      key so a column never appears twice under two names.
- *
- * There is no per-source special case and no hardcoded column list anywhere in
- * this file any more. Connecting a new lead-magnet database now renders its
- * columns with no code change, which is the failure this whole plan exists to
- * fix: previously a source with no hand-written entry rendered zero columns.
- */
-function useSourceColumns(source, canonicalMap) {
-  const [fields, setFields] = useState(null);
-
-  useEffect(() => {
-    if (!source) {
-      setFields(null);
-      return undefined;
-    }
-    let cancelled = false;
-    setFields(null);
-    fetchFilterFields(source)
-      .then((d) => !cancelled && setFields(d.fields || []))
-      // A source whose fields can't be read (disconnected, bad credentials)
-      // still has to render its canonical columns rather than an empty table.
-      .catch(() => !cancelled && setFields([]));
-    return () => {
-      cancelled = true;
-    };
-  }, [source]);
-
-  // Keyed on the map's content, not its identity — it is rebuilt from the
-  // campaign payload on every render and would otherwise recompute forever.
-  const mapKey = JSON.stringify(canonicalMap || {});
-
-  return useMemo(() => {
-    if (!fields) return [];
-    const canonical = Object.entries(JSON.parse(mapKey)).filter(([, field]) => field);
-    const mapped = new Set(canonical.map(([, field]) => field));
-    return [
-      ...canonical.map(([key, field]) => ({
-        key: `canonical:${key}`,
-        header: humanizeKey(key),
-        get: (doc) => doc[field],
-      })),
-      ...fields
-        .filter((f) => !mapped.has(f.key))
-        .map((f) => ({ key: f.key, header: f.label || f.key, get: (doc) => doc[f.key] })),
-    ];
-  }, [fields, mapKey]);
 }
 
 // --- Create campaign form ---------------------------------------------
@@ -332,22 +261,11 @@ function CampaignDetail({
   const [activeTab, setActiveTab] = useState("flow");
   const [flowDirty, setFlowDirty] = useState(false);
 
-  const [conditions, setConditions] = useState([]);
-  const [preview, setPreview] = useState(null);
-  const [previewedKey, setPreviewedKey] = useState(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(null);
+  // The last completed send, reported up by AudienceSendPanel. Kept here
+  // rather than inside that panel because it is what the Results tab below
+  // refreshes off: a send should immediately re-pull the delivery funnel, the
+  // activity roll-up, the enrollments table and the stuck-lead breakdown.
   const [enrollResult, setEnrollResult] = useState(null);
-  // Whether the send-confirmation dialog is up. Decoupled from `busy` (which
-  // tracks the actual in-flight request) because opening the dialog is a
-  // synchronous click with no request behind it yet — the request only
-  // starts once the dialog's own confirm button is pressed.
-  const [showSendConfirm, setShowSendConfirm] = useState(false);
-  // Whether the send being set up should also arm auto-enroll. Seeded from the
-  // campaign so re-sending an already-armed campaign doesn't silently disarm
-  // it, and re-synced because the panel stays mounted across reloads.
-  const [armAuto, setArmAuto] = useState(Boolean(campaign.autoEnroll));
-  useEffect(() => setArmAuto(Boolean(campaign.autoEnroll)), [campaign._id, campaign.autoEnroll]);
 
   // The campaign list's row only carries nodeCount/versionCount (see
   // GET /api/campaigns) - the flow canvas below needs the actual draft graph
@@ -382,36 +300,6 @@ function CampaignDetail({
   const [stuckRollup, setStuckRollup] = useState(null);
   const [stuckRollupError, setStuckRollupError] = useState(null);
 
-  const [membersPage, setMembersPage] = useState(1);
-  const [members, setMembers] = useState({ members: [], total: 0, totalPages: 1 });
-  const [membersError, setMembersError] = useState(null);
-
-  // The canonical field map feeding this campaign's preview table: the map on
-  // The source node this panel reads through, and with it both the source id
-  // and the canonical field map.
-  //
-  // The graph is the source of truth. A campaign has no `targetModel` field of
-  // its own any more — the source moved onto the source node when campaigns
-  // became graphs — so it is consulted only as a fallback, for rows written
-  // before that change. A graph may hold several source nodes (one per lead
-  // magnet); this panel shows the first, matching the legacy field when one is
-  // there to match.
-  const owningSourceNode = useMemo(() => {
-    const sourceNodes = ((fullCampaign && fullCampaign.draft && fullCampaign.draft.nodes) || []).filter(
-      (n) => n.kind === "source"
-    );
-    return sourceNodes.find((n) => n.config && n.config.sourceId === campaign.targetModel) || sourceNodes[0] || null;
-  }, [fullCampaign, campaign.targetModel]);
-
-  const sourceId =
-    (owningSourceNode && owningSourceNode.config && owningSourceNode.config.sourceId) ||
-    (campaign.sourceIds && campaign.sourceIds[0]) ||
-    campaign.targetModel ||
-    "";
-  const canonicalMap = (owningSourceNode && owningSourceNode.config && owningSourceNode.config.map) || {};
-
-  const columns = useSourceColumns(sourceId, canonicalMap);
-
   // nodeId -> label for each published version, so an enrollment row can name
   // the node it is parked on. Keyed by version as well as by id because an
   // enrollment walks the version it entered on: the same node id can carry a
@@ -435,9 +323,6 @@ function CampaignDetail({
     return (byId && byId.get(enrollment.currentNodeId)) || enrollment.currentNodeId;
   }
 
-  const filter = buildMongoFilter(conditions);
-  const filterKey = JSON.stringify(filter);
-
   useEffect(() => {
     fetchEnrollments(campaign._id, statusFilter, page)
       .then(setEnrollments)
@@ -458,73 +343,14 @@ function CampaignDetail({
     };
   }, [campaign._id, enrollResult]);
 
-  useEffect(() => setMembersPage(1), [filterKey]);
-
-  useEffect(() => {
-    setMembersError(null);
-    if (!sourceId) return;
-    fetchSegmentMembers(sourceId, filter, membersPage)
-      .then(setMembers)
-      .catch((err) => setMembersError(err.message));
-  }, [sourceId, filterKey, membersPage]);
-
-  async function handlePreview() {
-    setError(null);
-    setBusy(true);
-    try {
-      const result = await previewCampaignSend(campaign._id, filter);
-      setPreview(result);
-      setPreviewedKey(filterKey);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  // Opens the task-2 dialog instead of sending straight away. Guarded the
-  // same way the button itself is (disabled without a fresh preview) so a
-  // stray call can't open a dialog with nothing to show.
-  function openSendConfirm() {
-    if (!preview) return;
-    setShowSendConfirm(true);
-  }
-
-  // The dialog's onConfirm: returning this promise is what puts the dialog
-  // into its pending state, so a slow send can't be double-fired from a
-  // second click on the dialog's own confirm button. Errors are caught here
-  // (not rethrown) so the dialog closes the same way on success or failure,
-  // surfacing the error in the page underneath rather than leaving the
-  // dialog stuck open.
-  async function confirmSend() {
-    setError(null);
-    setBusy(true);
-    try {
-      const result = await enrollCampaign(campaign._id, filter, armAuto);
-      setEnrollResult(result);
-      setPreview(null);
-      setPreviewedKey(null);
-      setConditions([]);
-      // The stored segment shown below comes off the campaign document, so it
-      // has to be refetched for arming to be visible without a page reload.
-      if (armAuto) onChanged();
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setBusy(false);
-      setShowSendConfirm(false);
-    }
-  }
-
   // Bug fix (task 5, #22): this used to fire-and-forget with no try/catch and
   // no in-flight state, so pausing a live campaign could fail silently — the
   // button just sat there looking clickable while nothing happened. Given the
-  // same treatment as disarmAuto directly below: error surfaced, button
-  // disabled while the request is in flight. A dedicated busy/error pair
-  // (rather than reusing the segment-builder's `error`) because this action
-  // lives in the pinned header and has to report next to itself regardless of
-  // which sub-tab is showing — the segment builder's error paragraph is
-  // inside the Audience & Send panel and would be invisible from Results.
+  // same treatment: error surfaced, button disabled while the request is in
+  // flight. A dedicated busy/error pair because this action lives in the
+  // pinned header and has to report next to itself regardless of which sub-tab
+  // is showing — an error paragraph inside Audience & Send would be invisible
+  // from Results.
   const [toggleBusy, setToggleBusy] = useState(false);
   const [toggleError, setToggleError] = useState(null);
 
@@ -538,21 +364,6 @@ function CampaignDetail({
       setToggleError(err.message);
     } finally {
       setToggleBusy(false);
-    }
-  }
-
-  const [disarmBusy, setDisarmBusy] = useState(false);
-
-  async function disarmAuto() {
-    setError(null);
-    setDisarmBusy(true);
-    try {
-      await updateCampaign(campaign._id, { autoEnroll: false });
-      onChanged();
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setDisarmBusy(false);
     }
   }
 
@@ -573,18 +384,6 @@ function CampaignDetail({
     { key: "createdAt", header: "Enrolled", get: (d) => (d.createdAt ? new Date(d.createdAt).toLocaleString() : "") },
   ];
 
-  // Bug fix (task 5, #22): Send used to go from "disabled" to "explained" only
-  // after the first preview ran — on first load it was just disabled, with no
-  // way to tell why. This covers every case Send can be disabled for (never
-  // previewed yet, or previewed against a segment that has since changed) so
-  // there is always a visible reason when there is one.
-  const sendDisabledReason =
-    previewedKey === null
-      ? "Preview this segment first — Send unlocks once a preview has run against it."
-      : previewedKey !== filterKey
-        ? "Segment changed — preview again before sending."
-        : null;
-
   // CampaignStatus (task 3) needs the full detail shape — active, autoEnroll,
   // liveVersion and every published version — to tell draft from published.
   // `fullCampaign` carries that once it loads; until then this falls back to
@@ -602,7 +401,10 @@ function CampaignDetail({
         <h3>
           {campaign.name}{" "}
           <span className="muted">
-            — {sourceLabels[sourceId] || sourceId || "no source yet"} · sends from{" "}
+            {/* Every source the graph feeds from, not just the first: the
+                header used to name a single one picked off the draft, which
+                quietly under-reported a campaign fed by two lead magnets. */}
+            — {campaignSourceLabel(campaign, sourceLabels)} · sends from{" "}
             {campaign.channelId ? campaign.channelId : "Default channel"}
           </span>
         </h3>
@@ -630,6 +432,7 @@ function CampaignDetail({
           are not repeated below. */}
       <CampaignStatus
         campaign={statusCampaign}
+        sourceLabels={sourceLabels}
         sendingEnabled={sendingEnabled}
         sendingQueued={sendingQueued}
         sendingBusy={sendingBusy}
@@ -703,120 +506,35 @@ function CampaignDetail({
 
       {activeTab === "audience" && (
         <div className="campaign-subtab-panel">
-          <h4>Build a segment</h4>
-          {conditions.map((c, i) => (
-            <FilterCondition
-              key={i}
-              source={sourceId}
-              condition={c}
-              onChange={(next) => setConditions(conditions.map((cc, idx) => (idx === i ? next : cc)))}
-              onRemove={() => setConditions(conditions.filter((_, idx) => idx !== i))}
-            />
-          ))}
-          <button type="button" className="link-btn" onClick={() => setConditions([...conditions, { field: "", values: [] }])}>
-            + add condition
-          </button>
-          {!conditions.length && <p className="muted">No conditions — sending will target everyone in this source.</p>}
-
-          <h4>Matching members</h4>
-          <Pager page={members.page || membersPage} totalPages={members.totalPages} total={members.total} onChange={setMembersPage} />
-          <LeadsTable
-            columns={columns}
-            rows={members.members}
-            loading={false}
-            error={membersError}
+          <AudienceSendPanel
+            campaign={campaign}
+            fullCampaign={fullCampaign}
+            sourceLabels={sourceLabels}
+            onChanged={onChanged}
+            onGoToTab={setActiveTab}
+            onEnrolled={setEnrollResult}
+            onPublished={(published) => {
+              setFullCampaign((prev) =>
+                prev && {
+                  ...prev,
+                  liveVersion: published.liveVersion,
+                  versions: [
+                    ...(prev.versions || []),
+                    {
+                      version: published.version,
+                      nodes: published.nodes,
+                      edges: published.edges,
+                      publishedAt: published.publishedAt,
+                    },
+                  ],
+                }
+              );
+              onChanged();
+            }}
+            sendingEnabled={sendingEnabled}
+            sendingBusy={sendingBusy}
+            onToggleSending={onToggleSending}
           />
-
-          {error && <p className="error">{error}</p>}
-
-          <div className="form-actions">
-            <button type="button" className="secondary-btn" onClick={handlePreview} disabled={busy}>
-              Preview
-            </button>
-            <button
-              type="button"
-              onClick={openSendConfirm}
-              disabled={busy || previewedKey !== filterKey}
-              title={sendDisabledReason || undefined}
-            >
-              Send campaign
-            </button>
-            <label className="inline-check">
-              <input type="checkbox" checked={armAuto} onChange={(e) => setArmAuto(e.target.checked)} />{" "}
-              Keep this segment running
-            </label>
-          </div>
-          <p className="muted">
-            {armAuto
-              ? "New matches in the source will join this campaign automatically — no need to send again."
-              : "One-off send: only who matches right now is enrolled. Anyone added to the source later is not."}
-          </p>
-
-          {preview && previewedKey === filterKey && (
-            <p className="muted">
-              {preview.matched} matched · {preview.willEnroll} will be enrolled · {preview.alreadyEnrolled} already enrolled ·{" "}
-              {preview.skippedNoPhone} skipped (no phone) · {preview.skippedBadPhone} skipped (invalid phone)
-            </p>
-          )}
-          {sendDisabledReason && <p className="muted">{sendDisabledReason}</p>}
-          {enrollResult && (
-            <p className="notice">
-              Enrolled {enrollResult.enrolled} contacts. They'll start the flow on the next send cycle.
-            </p>
-          )}
-
-          {/* The status strip in the header already says whether auto-enroll
-              is on, what it's scanning for and when it last ran — this is
-              just the control to turn an already-armed campaign off, kept
-              next to the "keep this segment running" option above since
-              they're the same lever at two different points in time. */}
-          {campaign.autoEnroll && (
-            <p className="muted">
-              Auto-enroll is currently on for this campaign.{" "}
-              <button type="button" className="link-btn" onClick={disarmAuto} disabled={disarmBusy}>
-                {disarmBusy ? "Turning off…" : "Turn off auto-enroll"}
-              </button>
-            </p>
-          )}
-
-          {showSendConfirm && preview && (
-            <ConfirmDialog
-              title={`Send "${campaign.name}"?`}
-              confirmLabel="Send campaign"
-              onConfirm={confirmSend}
-              onCancel={() => setShowSendConfirm(false)}
-            >
-              <p>Sending to {sourceLabels[sourceId] || sourceId || "leads"}.</p>
-              <dl className="detail-grid">
-                <div className="detail-row">
-                  <dt>Matched</dt>
-                  <dd>{preview.matched}</dd>
-                </div>
-                <div className="detail-row">
-                  <dt>Will enroll</dt>
-                  <dd>{preview.willEnroll}</dd>
-                </div>
-                <div className="detail-row">
-                  <dt>Already enrolled</dt>
-                  <dd>{preview.alreadyEnrolled}</dd>
-                </div>
-                <div className="detail-row">
-                  <dt>Skipped (no phone)</dt>
-                  <dd>{preview.skippedNoPhone}</dd>
-                </div>
-                <div className="detail-row">
-                  <dt>Skipped (invalid phone)</dt>
-                  <dd>{preview.skippedBadPhone}</dd>
-                </div>
-              </dl>
-              {armAuto && (
-                <p>
-                  Keep this segment running is on — this segment stays live, and anyone who matches it later joins
-                  this campaign automatically.
-                </p>
-              )}
-            </ConfirmDialog>
-          )}
         </div>
       )}
 

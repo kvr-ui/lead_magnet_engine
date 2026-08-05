@@ -1,4 +1,5 @@
-import { describeFilter } from "./FilterBuilder";
+import { describeAutoEnrollFilter } from "./FilterBuilder";
+import { graphsEqual, findLiveGraph } from "./graphCompare";
 
 // What a campaign is actually doing right now, today scattered across four
 // places (the header's global kill switch, the campaign's own active flag,
@@ -15,34 +16,6 @@ import { describeFilter } from "./FilterBuilder";
 // Sending state is not fetched here — it is lifted to the app root (see
 // App.jsx) and passed down, so this component and the header toggle always
 // agree and there is never a second poll of it.
-
-// Order-independent structural compare of the draft graph against a
-// published version, so dragging a node around the canvas (same nodes/edges,
-// different position) doesn't falsely read as "differs from live". Node
-// position is deliberately left out of the comparison for that reason.
-// Intentionally not imported from FlowCanvas.jsx (which has its own,
-// position-inclusive version of this used to gate the Publish button) — that
-// file is owned by another task in this plan.
-function normalizeGraphForCompare(graph) {
-  const nodes = [...((graph && graph.nodes) || [])]
-    .map((n) => ({ id: n.id, kind: n.kind, label: n.label || "", config: n.config || {} }))
-    .sort((a, b) => a.id.localeCompare(b.id));
-  const edges = [...((graph && graph.edges) || [])]
-    .map((e) => ({ id: e.id, from: e.from, to: e.to, branch: e.branch || null }))
-    .sort((a, b) => a.id.localeCompare(b.id));
-  return JSON.stringify({ nodes, edges });
-}
-
-function graphsEqual(a, b) {
-  return normalizeGraphForCompare(a) === normalizeGraphForCompare(b);
-}
-
-function findLiveGraph(campaign) {
-  const version = campaign.liveVersion;
-  if (version === null || version === undefined) return null;
-  const entry = (campaign.versions || []).find((v) => v.version === version);
-  return entry ? { nodes: entry.nodes || [], edges: entry.edges || [] } : null;
-}
 
 // The sentence is the point of this component: it has to say, in the
 // vocabulary an operator uses, what is happening and what would change. The
@@ -94,7 +67,10 @@ function buildSentence({
   if (autoEnroll && !active) {
     clauses.push("auto-enroll is armed but paused with the campaign, so the source is not being rescanned");
   } else if (autoEnroll) {
-    clauses.push(`auto-enroll is rescanning the source for ${filterText}`);
+    // filterText now names the source itself ("Free Session leads where city
+    // is Chennai"), so the old "rescanning the source for …" would say source
+    // twice.
+    clauses.push(`auto-enroll is rescanning for ${filterText}`);
   } else {
     clauses.push("auto-enroll is off, so only leads enrolled by hand join");
   }
@@ -105,6 +81,9 @@ function buildSentence({
 
 export default function CampaignStatus({
   campaign,
+  // sourceId -> human label, so the armed segment can name the lead magnet it
+  // rescans rather than a raw "datasource:66f…" id.
+  sourceLabels = {},
   sendingEnabled = null,
   sendingQueued = 0,
   sendingBusy = false,
@@ -120,7 +99,7 @@ export default function CampaignStatus({
   const liveGraphKnown = hasPublished && liveGraph !== null;
   const draftDiffers = liveGraphKnown ? !graphsEqual(campaign.draft, liveGraph) : false;
 
-  const filterText = describeFilter(campaign.autoEnrollFilter);
+  const filterText = describeAutoEnrollFilter(campaign.autoEnrollFilter, sourceLabels);
 
   const sentence = buildSentence({
     active: campaign.active,
@@ -181,7 +160,7 @@ export default function CampaignStatus({
 
       {campaign.autoEnroll && (
         <p className="muted campaign-status-autoenroll-detail">
-          Filter: {filterText} ·{" "}
+          Segment: {filterText} ·{" "}
           {campaign.lastAutoEnrollError
             ? `last check failed: ${campaign.lastAutoEnrollError}`
             : campaign.lastAutoEnrollAt
