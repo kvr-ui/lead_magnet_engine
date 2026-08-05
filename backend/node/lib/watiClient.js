@@ -36,6 +36,34 @@ async function sendTemplateMessage({ endpoint, token, phone, templateName, broad
   return data;
 }
 
+// A free-typed ("session") message. Legal only inside the customer-initiated
+// 24-hour window, which is NOT checked here — lib/whatsappProvider.js owns that
+// gate, so every caller passes through it rather than each one remembering.
+//
+// WATI takes the number in the path and the body as a query parameter on this
+// endpoint, unlike sendTemplateMessage which takes a JSON body. Both shapes are
+// the provider's, not ours.
+async function sendSessionMessage({ endpoint, token, phone, text, channelNumber }) {
+  const query = new URLSearchParams({ messageText: String(text ?? "") });
+  if (channelNumber) query.set("channel_number", channelNumber);
+  const url = `${endpoint}/api/v1/sendSessionMessage/${encodeURIComponent(phone)}?${query.toString()}`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.result === false) {
+    const detail = data.info || data.message || JSON.stringify(data);
+    throw new Error(`WATI session send failed (${res.status}): ${detail}`);
+  }
+  return data;
+}
+
 // Approved WhatsApp templates configured in the WATI dashboard — powers the
 // campaign builder's template picker so users select by name instead of
 // typing (and possibly mistyping) it.
@@ -52,4 +80,4 @@ async function getMessageTemplates({ endpoint, token }) {
   return (data.messageTemplates || []).map((t) => ({ name: t.elementName, status: t.status }));
 }
 
-module.exports = { sendTemplateMessage, getMessageTemplates };
+module.exports = { sendTemplateMessage, sendSessionMessage, getMessageTemplates };

@@ -11,6 +11,9 @@ const { enrollCampaignTargets } = require("./campaignTargets");
 // query path would have rejected.
 const { isSafeValue } = require("./sourceData");
 const { isSendingEnabled } = require("./sendingSwitch");
+// Derived per read from the inbound message log, never stored as a flag — see
+// the header of lib/sessionWindow.js for why.
+const { isWindowOpen } = require("./sessionWindow");
 
 // How many due enrollments to send per poll tick, and the gap between sends —
 // keeps us well under the connected provider's rate limits instead of firing
@@ -528,7 +531,44 @@ async function evaluateElapsed(node, ctx) {
   return ctx.now.getTime() - from.getTime() >= days * UNIT_MS.days + hours * UNIT_MS.hours;
 }
 
-// A `condition` node's `config.on` picks one of four evaluation kinds. Each
+/**
+ * Is this lead's WhatsApp conversation window open right now?
+ *
+ * Deliberately asks about the phone rather than about this enrollment. The
+ * window belongs to the number: a lead who replied to a different campaign, or
+ * to the chatbot, opened one, and Meta will honour it here too. This is what
+ * makes it different from an `engagement` condition, which asks the narrower
+ * question "did anyone engage with the message THIS node names".
+ *
+ * Takes no config at all — there is nothing to configure, and a question with
+ * one true answer should not offer knobs that let it be asked wrongly.
+ */
+async function evaluateWindow(node, ctx) {
+  return ctx.deps.isWindowOpen(ctx.enrollment.phone, ctx.now);
+}
+
+/**
+ * Did this phone send ANY inbound message since our last send (the default) or
+ * since the enrollment started?
+ *
+ * Phone-based like `window`, and for the same reason: a reply belongs to the
+ * number, whoever it was nominally answering. This is what makes it more
+ * robust than an `engagement` condition with status "replied", which asks
+ * about one specific node's send and silently answers "no" whenever the
+ * provider message ids it keys on were never echoed or backfilled.
+ */
+async function evaluateReply(node, ctx) {
+  const config = node.config || {};
+  const since = String(config.since || "lastSend").toLowerCase().replace(/[^a-z]/g, "");
+  const from = since === "start"
+    ? startedAt(ctx.enrollment)
+    : lastSentAt(ctx.enrollment) || startedAt(ctx.enrollment);
+  const query = { phone: ctx.enrollment.phone, status: "received" };
+  if (from) query.receivedAt = { $gte: from };
+  return (await ctx.deps.MessageEvent.countDocuments(query)) > 0;
+}
+
+// A `condition` node's `config.on` picks one of six evaluation kinds. Each
 // returns a plain boolean, which the walker turns into the "yes"/"no" edge.
 async function evaluateCondition(node, ctx) {
   const config = node.config || {};
@@ -541,6 +581,8 @@ async function evaluateCondition(node, ctx) {
   if (on === "engagement") return evaluateEngagement(node, ctx);
   if (on === "activity") return evaluateActivity(node, ctx);
   if (on === "elapsed") return evaluateElapsed(node, ctx);
+  if (on === "window") return evaluateWindow(node, ctx);
+  if (on === "reply") return evaluateReply(node, ctx);
   throw new Error(`has an unknown condition kind "${config.on}"`);
 }
 
@@ -791,6 +833,25 @@ function renderParams(node, doc) {
   return slots;
 }
 
+/**
+ * The body of a free-text message node, with {{canonicalKey}} placeholders
+ * filled from the lead read live for this tick.
+ *
+ * Placeholders are named rather than positional, unlike a template's {{1}},
+ * {{2}}: a template's numbering is fixed by the provider-approved text and we
+ * only supply the values, whereas the body here IS the text, so naming the key
+ * inline is both readable and impossible to shift out of alignment by adding a
+ * variable in the middle.
+ *
+ * An unknown or empty key renders as "" rather than leaving the braces visible.
+ * A lead whose name we don't have should read "Hi," and not "Hi {{name}},".
+ */
+function renderText(node, doc) {
+  const raw = (node.config || {}).text;
+  if (!raw) return "";
+  return String(raw).replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_, key) => formatParamValue((doc || {})[key]));
+}
+
 // --- the walk itself -------------------------------------------------------
 
 function emptyResult() {
@@ -800,6 +861,7 @@ function emptyResult() {
     // or the action, so nothing at all is applied to the enrollment).
     stop: null,
     reason: null,
+    reasonCode: null,
     status: null,
     currentNodeId: undefined,
     nextSendAt: null,
@@ -816,10 +878,11 @@ function emptyResult() {
   };
 }
 
-function park(result, status, reason) {
+function park(result, status, reason, reasonCode) {
   result.stop = status;
   result.status = status;
   result.reason = reason;
+  result.reasonCode = reasonCode || null;
   return result;
 }
 
@@ -841,6 +904,7 @@ function defaultDeps() {
     resolveSource,
     MessageEvent,
     isSendingEnabled,
+    isWindowOpen,
     activitySinceLastSend: (...args) => require("./leadActivity").activitySinceLastSend(...args),
   };
 }
@@ -1131,11 +1195,16 @@ async function runWalk(enrollment, campaign, ctx) {
       } catch (err) {
         return park(result, "paused", `message node "${node.id}" could not read its source: ${err.message}`);
       }
+      // "template" unless the node says otherwise, so every graph published
+      // before free text existed keeps behaving exactly as it did.
+      const messageType = String(config.type || config.messageType || "template").toLowerCase() === "text" ? "text" : "template";
+
       if (!doc) {
         // Same outcome the flat stepper gave: the lead is gone, so the send
         // can't happen and won't ever be able to.
         result.history.push({
           nodeId: node.id,
+          messageType,
           templateId: config.templateId,
           sentAt: ctx.now,
           status: "error",
@@ -1144,10 +1213,13 @@ async function runWalk(enrollment, campaign, ctx) {
         return park(result, "failed", `target document ${enrollment.targetId} no longer exists`);
       }
 
-      const params = renderParams(node, doc);
+      const params = messageType === "text" ? [] : renderParams(node, doc);
+      const text = messageType === "text" ? renderText(node, doc) : "";
       const attempt = {
         nodeId: node.id,
+        messageType,
         templateId: config.templateId,
+        text,
         phone: enrollment.phone,
         params,
         meta: config.providerMeta,
@@ -1160,6 +1232,8 @@ async function runWalk(enrollment, campaign, ctx) {
       try {
         sendResult = await ctx.send({
           phone: enrollment.phone,
+          type: messageType,
+          text,
           templateId: config.templateId,
           meta: config.providerMeta,
           params,
@@ -1178,15 +1252,41 @@ async function runWalk(enrollment, campaign, ctx) {
           result.reason = err.message;
           return result;
         }
+
         attempt.status = "error";
         attempt.error = err.message;
         result.history.push({
           nodeId: node.id,
+          messageType,
           templateId: config.templateId,
           sentAt: ctx.now,
           status: "error",
           error: err.message,
         });
+
+        // A closed conversation window is not a broken flow and not a provider
+        // outage — it is a lead who hasn't spoken to us lately, and Meta
+        // refusing free text at them is the system working as designed.
+        // Paused rather than failed, and rather than the
+        // "gated" no-op a kill switch gets: gated leaves the lead due, which
+        // would re-attempt the same refused send every poll tick until the
+        // window happened to reopen. Paused stops, says why, and waits for the
+        // lead's next inbound message: the webhook resumes enrollments parked
+        // with REASON_WINDOW_CLOSED the moment their reply re-opens the window
+        // (see lib/replyFlows.js). currentNodeId stays on this node, so the
+        // resumed tick re-attempts exactly this send. Better still, put a
+        // "conversation window" condition in front of this node so the flow
+        // routes closed-window leads to a template instead of parking at all.
+        if (err.windowClosed) {
+          result.currentNodeId = node.id;
+          return park(
+            result,
+            "paused",
+            `message node "${node.id}" could not send free text: ${err.message}`,
+            CampaignEnrollment.REASON_WINDOW_CLOSED
+          );
+        }
+
         return park(result, "failed", err.message);
       }
 
@@ -1196,7 +1296,12 @@ async function runWalk(enrollment, campaign, ctx) {
       attempt.providerLocalMessageId = providerLocalMessageId;
       result.history.push({
         nodeId: node.id,
+        messageType,
         templateId: config.templateId,
+        // The body actually sent, kept because a free-text node's text is
+        // rendered per lead and re-rendering it later would read the lead as
+        // they are now, not as they were when this went out.
+        detail: messageType === "text" ? text : undefined,
         sentAt: ctx.now,
         status: "sent",
         providerMessageId,
@@ -1251,8 +1356,9 @@ async function applyWalkResult(enrollment, result, { persist }) {
   if (result.nextSendAt) enrollment.nextSendAt = result.nextSendAt;
   if (result.exitOutcome) enrollment.outcome = result.exitOutcome;
   // Cleared on a clean tick so a stale "why did this stop" can't outlive the
-  // condition that caused it.
+  // condition that caused it. The code has the same lifetime as the prose.
   enrollment.statusReason = result.reason || null;
+  enrollment.statusReasonCode = result.reasonCode || null;
 
   if (persist && typeof enrollment.save === "function") await enrollment.save();
   return enrollment;
@@ -1274,9 +1380,12 @@ async function noopSender() {
  * options:
  *   now      Date | number | string | () => Date - the instant the whole tick
  *            is evaluated at, frozen for its duration. Defaults to real time.
- *   send     async ({ phone, templateId, params, meta, channelId }) => result -
- *            the sender. Defaults to whatsappProvider.sendMessage; in a dry
- *            run it defaults to a no-op that returns {}.
+ *   send     async ({ phone, type, text, templateId, params, meta, channelId })
+ *            => result - the sender. `type` is "template" or "text"; a "text"
+ *            send carries the rendered body and is refused by the provider
+ *            outside the customer's conversation window. Defaults to
+ *            whatsappProvider.sendMessage; in a dry run it defaults to a no-op
+ *            that returns {}.
  *   performAction async (node, ctx) => { detail } - runs an `action` node's
  *            outbound call or source write-back. Defaults to the real executor;
  *            in a dry run it defaults to a no-op that performs nothing and

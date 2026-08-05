@@ -46,14 +46,29 @@ async function withDelivery(enrollments) {
 // filter builder's value dropdown. `field` is checked against the source's
 // real fields (a whitelist) before being interpolated into the aggregation
 // pipeline.
-async function distinctValues(source, field) {
+//
+// `filter` narrows what is counted to the segment being built. Without it every
+// count is taken across the whole collection, so a builder that has already
+// picked "CA Intermediate" still reports how many of *everyone* sit the
+// September attempt — numbers that add up to more leads than the condition
+// above them admits, and that read as a send volume nobody will receive.
+//
+// The caller decides what goes in it. In particular the field's OWN condition
+// belongs left out: counting a field within its own selection would return only
+// the values already picked, and there would be no way to add a second one.
+async function distinctValues(source, field, filter) {
   const fields = await getSourceFields(source);
   if (!fields) throw new Error(`Unknown source "${source}"`);
   if (!fields.some((f) => f.key === field)) {
     throw new Error(`Field "${field}" is not filterable for source "${source}"`);
   }
 
+  // Same validator the members table runs its filter through, so a filter that
+  // would be refused there cannot slip into an aggregation here.
+  const narrow = await validateFilter(source, filter || {});
+
   const pipeline = [
+    ...(Object.keys(narrow).length ? [{ $match: narrow }] : []),
     { $group: { _id: `$${field}`, count: { $sum: 1 } } },
     { $match: { _id: { $nin: [null, ""] } } },
     { $sort: { count: -1 } },
@@ -208,15 +223,29 @@ router.get("/campaigns/meta/fields", async (req, res) => {
   res.json({ fields });
 });
 
-// GET /api/campaigns/meta/values?source=...&field=...
-router.get("/campaigns/meta/values", async (req, res) => {
+// GET  /api/campaigns/meta/values?source=...&field=...&filter=<json>
+// POST /api/campaigns/meta/values  { source, field, filter }
+//
+// Same read either way, and POST for the same reason /meta/members needs it:
+// the narrowing filter carries $in lists, and a long one overflows Node's 16KB
+// header limit as a query string and is rejected with 431 before reaching this
+// handler. The UI posts; the GET form stays for the filterless case and for
+// anything calling it by hand.
+async function valuesHandler(req, res) {
+  const body = req.body || {};
   try {
-    const values = await distinctValues(req.query.source, req.query.field);
+    const source = body.source || req.query.source;
+    const rawFilter = body.filter !== undefined ? body.filter : req.query.filter;
+    const filter = typeof rawFilter === "string" ? JSON.parse(rawFilter || "{}") : rawFilter || {};
+    const values = await distinctValues(source, body.field || req.query.field, filter);
     res.json({ values });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
-});
+}
+
+router.get("/campaigns/meta/values", valuesHandler);
+router.post("/campaigns/meta/values", valuesHandler);
 
 // A graph as a request body may express it: nodes and edges, nothing else.
 // `versions` and `liveVersion` never arrive from a client (publish owns both),
@@ -241,7 +270,7 @@ function normalizeGraph(graph) {
 // endpoint (versions/liveVersion by publish) or written by the engine
 // (lastAutoEnroll*), and is refused rather than quietly dropped so a caller
 // never believes it saved something it did not.
-const PATCHABLE = ["name", "description", "channelId", "active", "autoEnroll", "autoEnrollFilter", "draft"];
+const PATCHABLE = ["name", "description", "channelId", "active", "autoEnroll", "autoEnrollFilter", "stopOnReply", "draft"];
 
 // The graph-era shape of autoEnrollFilter: the set of source-node filters
 // /enroll previewed and confirmed when auto-enroll was armed, e.g.
@@ -302,11 +331,12 @@ function assertNoBodyFilter(body) {
 // null until the first publish, which is what makes "enroll a campaign nobody
 // published" a detectable error instead of a silent run against a half-drawn
 // draft.
-function createCampaignDocument({ name, description, channelId, draft }) {
+function createCampaignDocument({ name, description, channelId, stopOnReply, draft }) {
   return Campaign.create({
     name,
     ...(description !== undefined ? { description } : {}),
     ...(channelId !== undefined ? { channelId } : {}),
+    ...(stopOnReply !== undefined ? { stopOnReply: Boolean(stopOnReply) } : {}),
     draft: normalizeGraph(draft),
   });
 }
@@ -382,6 +412,10 @@ router.post("/campaigns/:id/duplicate", async (req, res) => {
       name,
       description: body.description !== undefined ? body.description : source.description,
       channelId: body.channelId !== undefined ? body.channelId : source.channelId,
+      // Carried over like channelId: stop-on-reply is a property of the
+      // nurture behaviour being cloned, not of the clone's (empty) audience,
+      // and unlike autoEnroll it can't message anyone on its own.
+      stopOnReply: source.stopOnReply,
       // Deep copy: the nodes/edges the clone stores must share no object with
       // the source's, or a later edit of either graph would show up in both.
       draft: JSON.parse(JSON.stringify({ nodes: draft.nodes || [], edges: draft.edges || [] })),
@@ -757,3 +791,7 @@ router.post("/campaigns/:id/enrollments/:enrollmentId/cancel", async (req, res) 
 });
 
 module.exports = router;
+// Hung off the router so tools/verify-filter-facets.js can drive the real
+// counting function — including its filter validation — without standing up the
+// app and authenticating against it. Nothing in the app reads this.
+module.exports.distinctValues = distinctValues;

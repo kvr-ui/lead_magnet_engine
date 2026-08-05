@@ -295,6 +295,11 @@ router.get("/sends", async (req, res) => {
         graphVersion: "$graphVersion",
         phone: "$phone",
         templateId: "$history.templateId",
+        // A free-text send names no template, so a row that carried only
+        // templateId would read as a send with nothing in it. Defaulted for
+        // rows written before free text existed, which were all templates.
+        messageType: { $ifNull: ["$history.messageType", "template"] },
+        text: "$history.detail",
         sentAt: "$history.sentAt",
         status: "$history.status",
         error: "$history.error",
@@ -312,6 +317,11 @@ router.get("/sends", async (req, res) => {
         directMessageId: "$_id",
         phone: "$phone",
         templateId: "$templateId",
+        // The manual send form sends templates only, so this is constant
+        // rather than read — the two branches still have to project the same
+        // field set for $unionWith to produce one uniform shape.
+        messageType: "template",
+        text: null,
         sentAt: "$sentAt",
         status: "$status",
         error: "$error",

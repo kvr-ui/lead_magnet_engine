@@ -5,6 +5,7 @@ const MessageEvent = require("../models/MessageEvent");
 const OptOut = require("../models/OptOut");
 const { cleanPhone } = require("../lib/phone");
 const { asyncRouter } = require("../lib/asyncRouter");
+const { handleInboundReply } = require("../lib/replyFlows");
 
 const router = asyncRouter();
 
@@ -119,12 +120,16 @@ async function recordOptOut(phone, keyword) {
     { $set: { source: "inbound-keyword", keyword }, $setOnInsert: { phone } },
     { upsert: true, setDefaultsOnInsert: true }
   );
+  // Paused rows are cancelled too, not just active ones: inbound replies now
+  // resume window-parked enrollments (lib/replyFlows.js), so a paused row left
+  // standing after a STOP would spring back to life on the phone's next
+  // non-STOP message. Belt and braces with the OptOut guard in replyFlows.
   const { modifiedCount } = await CampaignEnrollment.updateMany(
-    { phone, status: "active" },
+    { phone, status: { $in: ["active", "paused"] } },
     { $set: { status: "cancelled" } }
   );
   console.log(
-    `[wati/webhook] opt-out: ${phone} sent "${keyword}" — cancelled ${modifiedCount} active enrollment(s) across all campaigns`
+    `[wati/webhook] opt-out: ${phone} sent "${keyword}" — cancelled ${modifiedCount} active/paused enrollment(s) across all campaigns`
   );
 }
 
@@ -300,6 +305,22 @@ router.post("/wati/webhook", async (req, res) => {
     }
   } catch (err) {
     console.error(`[wati/webhook] opt-out handling failed for ${phone || "unknown"}:`, err.message);
+  }
+
+  // Reply-driven flow control — same isolation rationale as the STOP block
+  // above: a bug here must never turn into a non-2xx that makes WATI redeliver.
+  // Re-checks the STOP keyword itself (the check is pure and cheap) so the two
+  // blocks stay independent: even if opt-out recording threw, a STOP message
+  // still never stops-with-outcome or resumes anything. Deliberately does NOT
+  // require text — a photo or voice note is still a reply, still re-opens the
+  // window, and should still count. All writes inside are idempotent, so a
+  // redelivered event is harmless.
+  try {
+    if (body.owner === false && phone && !matchStopKeyword(extractText(body))) {
+      await handleInboundReply(phone);
+    }
+  } catch (err) {
+    console.error(`[wati/webhook] reply-flow handling failed for ${phone || "unknown"}:`, err.message);
   }
 
   // WATI expects a 200 regardless of whether we matched an enrollment —
