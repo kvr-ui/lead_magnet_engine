@@ -9,6 +9,8 @@ import {
   fetchTemplates,
   fetchChannels,
   fetchEnrollments,
+  fetchStuckEnrollments,
+  retryEnrollmentsBulk,
   fetchCampaignSources,
   fetchActivitySummary,
 } from "./api";
@@ -177,65 +179,34 @@ const DETAIL_TABS = [
   { id: "results", label: "Results" },
 ];
 
-// --- Stuck-leads rollup (task 24, #24) ------------------------------------
+// --- Stuck-leads rollup (task 24, #24; server-side + retry in task 6, #34) -
 //
 // The engine's contract is that a broken graph parks the enrollment
 // (paused/failed) with a human-readable `statusReason` rather than throwing.
-// The enrollments table below is paginated, so a rollup built from whatever
-// page happens to be loaded would under-count and mislead — it has to walk
-// every paused and every failed row itself. GET /campaigns/:id/enrollments
-// makes that possible without a backend change: it takes a status filter and
-// its `total` is an exact countDocuments, uncapped by page size. So this
-// pages through status=paused and status=failed at the endpoint's own
-// maximum page size (1000) and tallies statusReason across every row.
+// This used to be walked client-side by paging every paused/failed row off
+// GET /campaigns/:id/enrollments and tallying statusReason text. Task 6 moved
+// the tally onto the backend (GET /campaigns/:id/enrollments/stuck) so it can
+// group by the same machine-readable classification the retry actions below
+// key on -- task 2's lastAttemptClass for failed rows, and the window-closed
+// park code (with its legacy-prose fallback) for paused ones -- rather than
+// by whatever free-text sentence a given tick happened to write.
 //
-// ROLLUP_MAX_PAGES bounds how far it will page per status, purely so one
-// pathological campaign can't turn a tab load into thousands of requests. In
-// the (expected to be rare) case that bound is hit, `complete` comes back
-// false and the UI says so rather than presenting a partial breakdown as the
-// whole picture — the total count itself stays exact either way, since it
-// comes from the endpoint's `total`, not from how many rows were fetched.
-const ROLLUP_STATUSES = ["paused", "failed"];
-const ROLLUP_PAGE_SIZE = 1000;
-const ROLLUP_MAX_PAGES = 20;
+// Turns the reason keys the endpoint returns (e.g. "window-closed",
+// "retryable", "unclassified") into the sentence an operator reads. A key
+// with no entry here (a classification added to lib/errorClassification.js
+// after this map was written) still renders -- just as its raw key -- rather
+// than disappearing from the breakdown.
+const STUCK_REASON_LABELS = {
+  "window-closed": "Waiting for the 24-hour reply window to reopen",
+  retryable: "Temporary send failure (retrying automatically)",
+  undeliverable: "Number can't receive WhatsApp messages",
+  terminal: "Send failed permanently — needs a template or config fix",
+  unclassified: "Failed for a reason outside the send path (e.g. a missing target)",
+  other: "Other",
+};
 
-async function fetchStuckLeadRollup(campaignId) {
-  const counts = new Map(); // "status\u0000reason" -> count
-  let total = 0;
-  let complete = true;
-
-  for (const status of ROLLUP_STATUSES) {
-    let page = 1;
-    let seen = 0;
-    let statusTotal = 0;
-    for (;;) {
-      const res = await fetchEnrollments(campaignId, status, page, ROLLUP_PAGE_SIZE);
-      if (page === 1) statusTotal = res.total || 0;
-      const rows = res.enrollments || [];
-      for (const e of rows) {
-        const reason = (e.statusReason || "").trim() || "No reason recorded";
-        const key = `${status}\u0000${reason}`;
-        counts.set(key, (counts.get(key) || 0) + 1);
-      }
-      seen += rows.length;
-      if (seen >= statusTotal || rows.length === 0) break;
-      if (page >= ROLLUP_MAX_PAGES) {
-        complete = false;
-        break;
-      }
-      page += 1;
-    }
-    total += statusTotal;
-  }
-
-  const reasons = [...counts.entries()]
-    .map(([key, count]) => {
-      const [status, reason] = key.split("\u0000");
-      return { status, reason, count };
-    })
-    .sort((a, b) => b.count - a.count);
-
-  return { total, reasons, complete };
+function stuckReasonLabel(reason) {
+  return STUCK_REASON_LABELS[reason] || reason;
 }
 
 function CampaignDetail({
@@ -294,11 +265,17 @@ function CampaignDetail({
   // The lead whose message timeline is open, if any.
   const [timelineFor, setTimelineFor] = useState(null);
   // Campaign-wide breakdown of why enrollments are stuck, independent of the
-  // status filter/pager above (see fetchStuckLeadRollup) — null until the
-  // first fetch resolves, so "no rollup yet" and "rollup says nothing is
-  // stuck" (total === 0) are never conflated.
+  // status filter/pager above (see fetchStuckEnrollments in api.js) — null
+  // until the first fetch resolves, so "no rollup yet" and "rollup says
+  // nothing is stuck" (total === 0) are never conflated.
   const [stuckRollup, setStuckRollup] = useState(null);
   const [stuckRollupError, setStuckRollupError] = useState(null);
+  // Retry-all (task 6, #34): busy/error/result for the bulk requeue action in
+  // the stuck-leads block. Separate from stuckRollupError, which is about
+  // *reading* the rollup, not about the retry request itself.
+  const [retryBusy, setRetryBusy] = useState(false);
+  const [retryError, setRetryError] = useState(null);
+  const [retryResult, setRetryResult] = useState(null);
 
   // nodeId -> label for each published version, so an enrollment row can name
   // the node it is parked on. Keyed by version as well as by id because an
@@ -335,13 +312,51 @@ function CampaignDetail({
   useEffect(() => {
     let cancelled = false;
     setStuckRollupError(null);
-    fetchStuckLeadRollup(campaign._id)
+    fetchStuckEnrollments(campaign._id)
       .then((r) => !cancelled && setStuckRollup(r))
       .catch((err) => !cancelled && setStuckRollupError(err.message));
     return () => {
       cancelled = true;
     };
   }, [campaign._id, enrollResult]);
+
+  // Requeues every enrollment in every stuck status this campaign currently
+  // has (usually just one of paused/failed, sometimes both) and then reuses
+  // the same enrollResult trigger a completed send uses, so the enrollments
+  // table, the delivery funnel and this rollup all refetch together. One
+  // retry-bulk call per status because the endpoint scopes a call to a single
+  // status (see routes/campaigns.js) — "Retry all" is the sum of those calls,
+  // not a third endpoint.
+  async function retryAllStuck() {
+    if (!stuckRollup) return;
+    setRetryError(null);
+    setRetryResult(null);
+    setRetryBusy(true);
+    try {
+      const statuses = Object.keys(stuckRollup.byStatus || {}).filter(
+        (status) => stuckRollup.byStatus[status].count > 0
+      );
+      let requeued = 0;
+      let capped = false;
+      for (const status of statuses) {
+        const result = await retryEnrollmentsBulk(campaign._id, { status });
+        requeued += result.requeued;
+        capped = capped || result.capped;
+      }
+      setRetryResult(
+        requeued
+          ? `Requeued ${requeued} lead${requeued === 1 ? "" : "s"}.${
+              capped ? " More were stuck than one call could cover — run Retry all again to pick up the rest." : ""
+            }`
+          : "Nothing to requeue."
+      );
+      setEnrollResult({ retriedAt: Date.now() });
+    } catch (err) {
+      setRetryError(err.message);
+    } finally {
+      setRetryBusy(false);
+    }
+  }
 
   // Bug fix (task 5, #22): this used to fire-and-forget with no try/catch and
   // no in-flight state, so pausing a live campaign could fail silently — the
@@ -390,7 +405,7 @@ function CampaignDetail({
     { key: "phone", header: "Phone", get: (d) => d.phone },
     { key: "status", header: "Drip", get: (d) => d.status },
     // Why the engine parked this lead (statusReason) — blank for a lead that
-    // is progressing normally. See fetchStuckLeadRollup above for where the
+    // is progressing normally. See fetchStuckEnrollments above for where the
     // campaign-wide version of this same field is rolled up.
     { key: "statusReason", header: "Reason", get: (d) => d.statusReason || "" },
     // How the drip ended, for completed rows: an exit node's label, or
@@ -593,31 +608,34 @@ function CampaignDetail({
           <h4>Activity after this campaign</h4>
           <CampaignActivity campaignId={campaign._id} refreshKey={enrollResult} />
 
-          {/* Campaign-wide, not page-scoped -- see fetchStuckLeadRollup above for
-              how that is achieved without a backend change. Renders nothing
-              at all (not an empty box) once loaded if nothing is stuck. */}
+          {/* Campaign-wide, not page-scoped -- see GET /campaigns/:id/enrollments/stuck
+              (fetchStuckEnrollments in api.js). Renders nothing at all (not an
+              empty box) once loaded if nothing is stuck — see the total > 0
+              guard below. */}
           {stuckRollupError && (
             <p className="error">Could not load the stuck-leads breakdown: {stuckRollupError}</p>
           )}
           {stuckRollup && stuckRollup.total > 0 && (
             <div className="stuck-rollup">
-              <h4>Why leads are stuck ({stuckRollup.total} paused or failed, campaign-wide)</h4>
+              <div className="stuck-rollup-head">
+                <h4>Why leads are stuck ({stuckRollup.total} paused or failed, campaign-wide)</h4>
+                <button type="button" className="secondary-btn" onClick={retryAllStuck} disabled={retryBusy}>
+                  {retryBusy ? "Retrying…" : "Retry all"}
+                </button>
+              </div>
               <ul className="stuck-rollup-list">
-                {stuckRollup.reasons.map((r) => (
-                  <li key={`${r.status} ${r.reason}`} className="stuck-rollup-row">
-                    <span className={`badge ${r.status === "failed" ? "badge-danger" : "badge-warning"}`}>{r.count}</span>
-                    <span className="stuck-rollup-reason">{r.reason}</span>
-                    <span className="muted">({r.status})</span>
-                  </li>
-                ))}
+                {Object.entries(stuckRollup.byStatus).flatMap(([status, { byReason }]) =>
+                  Object.entries(byReason).map(([reason, count]) => (
+                    <li key={`${status} ${reason}`} className="stuck-rollup-row">
+                      <span className={`badge ${status === "failed" ? "badge-danger" : "badge-warning"}`}>{count}</span>
+                      <span className="stuck-rollup-reason">{stuckReasonLabel(reason)}</span>
+                      <span className="muted">({status})</span>
+                    </li>
+                  ))
+                )}
               </ul>
-              {!stuckRollup.complete && (
-                <p className="muted">
-                  This campaign has more paused/failed leads than the breakdown scanned ({ROLLUP_MAX_PAGES * ROLLUP_PAGE_SIZE} per
-                  status) -- the {stuckRollup.total} total above is exact, but the reason counts below only cover what was
-                  scanned, not every one of them.
-                </p>
-              )}
+              {retryError && <p className="error">Retry failed: {retryError}</p>}
+              {retryResult && <p className="muted">{retryResult}</p>}
             </div>
           )}
 

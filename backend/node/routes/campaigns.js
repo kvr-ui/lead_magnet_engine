@@ -11,6 +11,7 @@ const { getSourceHandle, validateFilter } = require("../lib/sourceData");
 const { lastInboundFor, describeWindow } = require("../lib/sessionWindow");
 const { cleanPhone } = require("../lib/phone");
 const { asyncRouter } = require("../lib/asyncRouter");
+const { LEGACY_WINDOW_PARK } = require("../lib/replyFlows");
 
 const router = asyncRouter();
 
@@ -790,8 +791,205 @@ router.post("/campaigns/:id/enrollments/:enrollmentId/cancel", async (req, res) 
   res.json(enrollment);
 });
 
+// ---------------------------------------------------------------------------
+// Requeue — put a parked enrollment back in motion.
+//
+// "Parked" means "paused" (the graph it was walking is broken and needs an
+// edit) or "failed" (the message node exhausted task 2's retry budget, or the
+// target it names vanished). Both are dead ends today: nothing puts the row
+// back on the clock once the operator has fixed the underlying cause. Active,
+// cancelled and completed rows are deliberately not requeueable — cancelled
+// and completed are done on purpose, and "retrying" an active row is a no-op
+// that would only obscure a caller's mistake.
+// ---------------------------------------------------------------------------
+const REQUEUEABLE_STATUSES = new Set(["paused", "failed"]);
+
+// One place both the single and bulk endpoints build the reset from, so the
+// two paths can never drift apart on what "requeued" means. currentNodeId and
+// graphVersion are deliberately absent — the lead resumes on the node and the
+// graph version it was walking, not at the start. lastAttemptClass is cleared
+// alongside sendAttempts because the model documents them as one streak
+// ("Reset to 0 the moment a send lands" — see CampaignEnrollment.js): a fresh
+// attempt should not carry the previous run's failure class into a stuck view
+// it hasn't earned yet.
+function requeueUpdate(now) {
+  return {
+    status: "active",
+    statusReason: null,
+    statusReasonCode: null,
+    sendAttempts: 0,
+    lastAttemptClass: null,
+    nextSendAt: now,
+  };
+}
+
+// POST /api/campaigns/:id/enrollments/:enrollmentId/retry — requeue one
+// parked enrollment. Returns the updated row, or 400 if it isn't parked.
+async function retryEnrollment(campaignId, enrollmentId) {
+  const enrollment = await CampaignEnrollment.findOne({ _id: enrollmentId, campaign: campaignId });
+  if (!enrollment) return { error: "not_found" };
+  if (!REQUEUEABLE_STATUSES.has(enrollment.status)) {
+    return { error: "not_requeueable", status: enrollment.status };
+  }
+  Object.assign(enrollment, requeueUpdate(new Date()));
+  await enrollment.save();
+  return { enrollment };
+}
+
+router.post("/campaigns/:id/enrollments/:enrollmentId/retry", async (req, res) => {
+  const result = await retryEnrollment(req.params.id, req.params.enrollmentId);
+  if (result.error === "not_found") return res.status(404).json({ error: "Enrollment not found" });
+  if (result.error === "not_requeueable") {
+    return res.status(400).json({
+      error: `Only paused or failed enrollments can be retried (this one is ${result.status})`,
+    });
+  }
+  res.json(result.enrollment);
+  // Same reasoning as /enroll's kick: the row is due now, so nudge the poller
+  // rather than let it wait out the interval.
+  kickPoll();
+});
+
+// A single call is capped so it cannot rewrite an unbounded collection in one
+// request. Chosen well above any batch an operator would realistically retry
+// by hand, and small enough that hitting it is itself a useful signal that
+// the caller should page rather than retry everything at once.
+const RETRY_BULK_CAP = 300;
+
+// POST /api/campaigns/:id/enrollments/retry-bulk — requeue every enrollment
+// in `status` for this campaign, or just `ids` (still filtered to `status`,
+// so an id list that includes a cancelled/completed row can't sweep it up).
+// Capped at RETRY_BULK_CAP per call; `capped: true` says the cap truncated
+// the batch rather than the request having silently done less than asked.
+async function retryEnrollmentsBulk(campaignId, { status, ids } = {}) {
+  if (!REQUEUEABLE_STATUSES.has(status)) {
+    return { error: `"status" must be one of: ${[...REQUEUEABLE_STATUSES].join(", ")}` };
+  }
+  if (ids !== undefined && !Array.isArray(ids)) {
+    return { error: "ids must be an array of enrollment ids" };
+  }
+
+  const filter = { campaign: campaignId, status };
+  if (ids && ids.length) filter._id = { $in: ids };
+
+  const matched = await CampaignEnrollment.countDocuments(filter);
+  // Deterministic order so which rows land inside the cap doesn't depend on
+  // Mongo's natural order, which is not guaranteed stable across calls.
+  const page = await CampaignEnrollment.find(filter).select("_id").sort({ _id: 1 }).limit(RETRY_BULK_CAP).lean();
+  const targetIds = page.map((row) => row._id);
+
+  const now = new Date();
+  const { modifiedCount } = targetIds.length
+    ? await CampaignEnrollment.updateMany({ _id: { $in: targetIds } }, { $set: requeueUpdate(now) })
+    : { modifiedCount: 0 };
+
+  return {
+    matched,
+    requeued: modifiedCount,
+    cap: RETRY_BULK_CAP,
+    capped: matched > RETRY_BULK_CAP,
+  };
+}
+
+router.post("/campaigns/:id/enrollments/retry-bulk", async (req, res) => {
+  const campaign = await Campaign.findById(req.params.id).select("_id").lean();
+  if (!campaign) return res.status(404).json({ error: "Campaign not found" });
+
+  const { status, ids } = req.body || {};
+  const result = await retryEnrollmentsBulk(campaign._id, { status, ids });
+  if (result.error) return res.status(400).json({ error: result.error });
+
+  res.json(result);
+  if (result.requeued > 0) kickPoll();
+});
+
+// The same "window-closed" classification lib/replyFlows.js uses to find
+// resumable rows, reused here so a stuck row is bucketed under one name
+// whether it is being matched for resumption or just being counted. Legacy
+// rows (parked before statusReasonCode existed) fall back to the same prose
+// match rather than landing in "other", which would make the breakdown
+// undercount the one park reason that is actually self-healing.
+function reasonExpr(campaignEnrollmentModel) {
+  return {
+    $switch: {
+      branches: [
+        {
+          case: { $eq: ["$status", "paused"] },
+          then: {
+            $cond: [
+              {
+                $or: [
+                  { $eq: ["$statusReasonCode", campaignEnrollmentModel.REASON_WINDOW_CLOSED] },
+                  {
+                    $and: [
+                      // A statusReasonCode path absent entirely (rows written
+                      // before the field existed) evaluates to BSON "missing",
+                      // which $in does NOT treat as equal to null - hence the
+                      // $ifNull normalizing it first. Without this, every
+                      // legacy row's null-ness check silently comes back
+                      // false and the row falls through to "other".
+                      { $in: [{ $ifNull: ["$statusReasonCode", null] }, [null, ""]] },
+                      { $regexMatch: { input: { $ifNull: ["$statusReason", ""] }, regex: LEGACY_WINDOW_PARK.source } },
+                    ],
+                  },
+                ],
+              },
+              campaignEnrollmentModel.REASON_WINDOW_CLOSED,
+              "other",
+            ],
+          },
+        },
+        {
+          // "failed" rows aren't parked waiting on anything external — their
+          // classification is the send-error bucket lib/errorClassification.js
+          // assigned the last attempt (see task 2), not a statusReasonCode.
+          case: { $eq: ["$status", "failed"] },
+          then: { $ifNull: ["$lastAttemptClass", "unclassified"] },
+        },
+      ],
+      default: "other",
+    },
+  };
+}
+
+// GET /api/campaigns/:id/enrollments/stuck — counts of parked enrollments,
+// grouped by status and, within each status, by why. Powers the results
+// view's stuck-leads block: how many, and whether retrying is likely to help
+// (a "retryable" failed row probably will; a "terminal" one probably needs a
+// template fix first).
+async function stuckRollup(campaignId) {
+  const rows = await CampaignEnrollment.aggregate([
+    { $match: { campaign: campaignId, status: { $in: [...REQUEUEABLE_STATUSES] } } },
+    { $project: { status: 1, reason: reasonExpr(CampaignEnrollment) } },
+    { $group: { _id: { status: "$status", reason: "$reason" }, count: { $sum: 1 } } },
+  ]);
+
+  const byStatus = {};
+  let total = 0;
+  for (const row of rows) {
+    const { status, reason } = row._id;
+    if (!byStatus[status]) byStatus[status] = { count: 0, byReason: {} };
+    byStatus[status].count += row.count;
+    byStatus[status].byReason[reason] = (byStatus[status].byReason[reason] || 0) + row.count;
+    total += row.count;
+  }
+  return { total, byStatus };
+}
+
+router.get("/campaigns/:id/enrollments/stuck", async (req, res) => {
+  const campaign = await Campaign.findById(req.params.id).select("_id").lean();
+  if (!campaign) return res.status(404).json({ error: "Campaign not found" });
+  res.json(await stuckRollup(campaign._id));
+});
+
 module.exports = router;
 // Hung off the router so tools/verify-filter-facets.js can drive the real
 // counting function — including its filter validation — without standing up the
 // app and authenticating against it. Nothing in the app reads this.
 module.exports.distinctValues = distinctValues;
+// Same reasoning, for tools/verify-requeue.js: it drives the requeue logic
+// (single, bulk, and the stuck rollup) directly against a real Mongo
+// connection, without standing up the app or its HTTP layer.
+module.exports.retryEnrollment = retryEnrollment;
+module.exports.retryEnrollmentsBulk = retryEnrollmentsBulk;
+module.exports.stuckRollup = stuckRollup;

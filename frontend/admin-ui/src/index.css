@@ -1826,12 +1826,13 @@ select:focus-visible {
   vertical-align: middle;
 }
 
-/* --- Stuck-leads rollup (task 24, #24) ---------------------------------
+/* --- Stuck-leads rollup (task 24, #24; retry action added in task 6, #34) -
    Above the Results sub-tab's enrollments table: a campaign-wide breakdown
-   of paused/failed enrollments grouped by their recorded statusReason (see
-   fetchStuckLeadRollup in CampaignsTab.jsx). Reuses .badge/.badge-warning/
-   .badge-danger and .muted throughout; the only new rules are layout for
-   the list itself, built from existing spacing/border/surface tokens. */
+   of paused/failed enrollments grouped by why they're stuck (see
+   fetchStuckEnrollments in CampaignsTab.jsx/api.js), plus a "Retry all"
+   action that requeues them. Reuses .badge/.badge-warning/.badge-danger,
+   .secondary-btn and .muted throughout; the only new rules are layout for
+   the list and header, built from existing spacing/border/surface tokens. */
 
 .stuck-rollup {
   margin: 0.75rem 0 1rem;
@@ -1843,6 +1844,19 @@ select:focus-visible {
 
 .stuck-rollup h4 {
   margin: 0 0 0.5rem;
+}
+
+/* Houses the heading next to the task-6 "Retry all" action, so the button
+   sits beside the count instead of forcing its own row above the list. */
+.stuck-rollup-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.stuck-rollup-head h4 {
+  margin: 0;
 }
 
 .stuck-rollup-list {
