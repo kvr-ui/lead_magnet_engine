@@ -18,10 +18,12 @@ import {
 } from "./api";
 import LeadsTable from "./LeadsTable";
 import Pager from "./Pager";
-import FilterCondition, { buildMongoFilter, describeFilter } from "./FilterBuilder";
+import FilterCondition, { buildMongoFilter } from "./FilterBuilder";
 import { DeliveryFunnel, DeliveryCell, EnrollmentTimeline } from "./MessageDelivery";
 import CampaignActivity from "./LeadActivity";
 import FlowCanvas from "./FlowCanvas";
+import CampaignStatus from "./CampaignStatus";
+import ConfirmDialog from "./ConfirmDialog";
 
 function humanizeKey(key) {
   const spaced = key.replace(/([a-z0-9])([A-Z])/g, "$1 $2");
@@ -113,16 +115,14 @@ function CreateCampaignForm({ sources, onCreated, onCancel }) {
   const [description, setDescription] = useState("");
   // Seeded from whatever the backend offers first rather than from a source
   // name written here, so this form has no opinion about which sources exist.
-  const [targetModel, setTargetModel] = useState("");
+  // Where this campaign's leads come from - on submit this becomes a real
+  // source node in the new campaign's draft graph (see handleSubmit) rather
+  // than a campaign-level field, which nothing reads any more.
+  const [sourceId, setSourceId] = useState("");
   useEffect(() => {
-    setTargetModel((current) => current || (sources[0] && sources[0].value) || "");
+    setSourceId((current) => current || (sources[0] && sources[0].value) || "");
   }, [sources]);
   const [channelId, setChannelId] = useState("");
-  // The flow being drawn on the canvas below, serialized straight into the
-  // shape campaign.draft expects (see FlowCanvas.jsx) and posted as the new
-  // campaign's initial draft on submit.
-  const [graph, setGraph] = useState({ nodes: [], edges: [] });
-  const [graphValid, setGraphValid] = useState(true);
   const [error, setError] = useState(null);
   const [saving, setSaving] = useState(false);
   const [channels, setChannels] = useState([]);
@@ -145,19 +145,38 @@ function CreateCampaignForm({ sources, onCreated, onCancel }) {
       .catch((err) => setChannelsError(err.message));
   }, []);
 
+  // The chosen source becomes the seed for the new campaign's graph: a
+  // single source node, carrying the chosen source id in its config and
+  // labelled with the source's display name, positioned near the top-left of
+  // the canvas so it reads as the flow's starting point. Mirrors the node
+  // shape FlowCanvas.jsx itself builds on drop (id/kind/label/position/config
+  // - see its onDrop/toDomainGraph). It still needs a phone mapping and an
+  // outgoing edge before it can be published or enrolled (graphValidation.js
+  // / campaignTargets.js), which the validation panel surfaces the moment the
+  // new campaign opens on its Flow tab - exactly the next step for the admin.
+  function seedSourceNode() {
+    const chosen = sources.find((s) => s.value === sourceId);
+    return {
+      id: `source-${Date.now().toString(36)}-seed`,
+      kind: "source",
+      label: (chosen && chosen.label) || sourceId,
+      position: { x: 80, y: 80 },
+      config: { sourceId },
+    };
+  }
+
   async function handleSubmit(e) {
     e.preventDefault();
     setError(null);
     setSaving(true);
     try {
-      await createCampaign({
+      const created = await createCampaign({
         name,
         description,
-        targetModel,
         channelId,
-        draft: graph,
+        draft: { nodes: [seedSourceNode()], edges: [] },
       });
-      onCreated();
+      onCreated(created);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -184,17 +203,6 @@ function CreateCampaignForm({ sources, onCreated, onCancel }) {
       </label>
 
       <label className="form-row">
-        Target source
-        <select value={targetModel} onChange={(e) => setTargetModel(e.target.value)}>
-          {sources.map((s) => (
-            <option key={s.value} value={s.value}>
-              {s.label}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <label className="form-row">
         Send from (channel)
         {channelsError && <p className="error">{channelsError}</p>}
         <select value={channelId} onChange={(e) => setChannelId(e.target.value)} required>
@@ -207,11 +215,19 @@ function CreateCampaignForm({ sources, onCreated, onCancel }) {
         </select>
       </label>
 
-      <h4>Flow</h4>
-      <FlowCanvas sources={sources} onGraphChange={setGraph} onValidityChange={setGraphValid} />
+      <label className="form-row">
+        Leads from (source)
+        <select value={sourceId} onChange={(e) => setSourceId(e.target.value)}>
+          {sources.map((s) => (
+            <option key={s.value} value={s.value}>
+              {s.label}
+            </option>
+          ))}
+        </select>
+      </label>
 
       <div className="form-actions">
-        <button type="submit" disabled={saving || !graphValid}>
+        <button type="submit" disabled={saving}>
           {saving ? "Saving…" : "Create campaign"}
         </button>
         <button type="button" className="secondary-btn" onClick={onCancel}>
@@ -224,13 +240,109 @@ function CreateCampaignForm({ sources, onCreated, onCancel }) {
 
 // --- Campaign detail: filter, preview, send, enrollments -----------------
 
-function CampaignDetail({ campaign, sourceLabels, sources, onClose, onChanged, onDuplicate, duplicating }) {
+// The three sub-tabs a campaign's detail view is split into (task 5). Order
+// here is also render order and chip order.
+const DETAIL_TABS = [
+  { id: "flow", label: "Flow" },
+  { id: "audience", label: "Audience & Send" },
+  { id: "results", label: "Results" },
+];
+
+// --- Stuck-leads rollup (task 24, #24) ------------------------------------
+//
+// The engine's contract is that a broken graph parks the enrollment
+// (paused/failed) with a human-readable `statusReason` rather than throwing.
+// The enrollments table below is paginated, so a rollup built from whatever
+// page happens to be loaded would under-count and mislead — it has to walk
+// every paused and every failed row itself. GET /campaigns/:id/enrollments
+// makes that possible without a backend change: it takes a status filter and
+// its `total` is an exact countDocuments, uncapped by page size. So this
+// pages through status=paused and status=failed at the endpoint's own
+// maximum page size (1000) and tallies statusReason across every row.
+//
+// ROLLUP_MAX_PAGES bounds how far it will page per status, purely so one
+// pathological campaign can't turn a tab load into thousands of requests. In
+// the (expected to be rare) case that bound is hit, `complete` comes back
+// false and the UI says so rather than presenting a partial breakdown as the
+// whole picture — the total count itself stays exact either way, since it
+// comes from the endpoint's `total`, not from how many rows were fetched.
+const ROLLUP_STATUSES = ["paused", "failed"];
+const ROLLUP_PAGE_SIZE = 1000;
+const ROLLUP_MAX_PAGES = 20;
+
+async function fetchStuckLeadRollup(campaignId) {
+  const counts = new Map(); // "status\u0000reason" -> count
+  let total = 0;
+  let complete = true;
+
+  for (const status of ROLLUP_STATUSES) {
+    let page = 1;
+    let seen = 0;
+    let statusTotal = 0;
+    for (;;) {
+      const res = await fetchEnrollments(campaignId, status, page, ROLLUP_PAGE_SIZE);
+      if (page === 1) statusTotal = res.total || 0;
+      const rows = res.enrollments || [];
+      for (const e of rows) {
+        const reason = (e.statusReason || "").trim() || "No reason recorded";
+        const key = `${status}\u0000${reason}`;
+        counts.set(key, (counts.get(key) || 0) + 1);
+      }
+      seen += rows.length;
+      if (seen >= statusTotal || rows.length === 0) break;
+      if (page >= ROLLUP_MAX_PAGES) {
+        complete = false;
+        break;
+      }
+      page += 1;
+    }
+    total += statusTotal;
+  }
+
+  const reasons = [...counts.entries()]
+    .map(([key, count]) => {
+      const [status, reason] = key.split("\u0000");
+      return { status, reason, count };
+    })
+    .sort((a, b) => b.count - a.count);
+
+  return { total, reasons, complete };
+}
+
+function CampaignDetail({
+  campaign,
+  sourceLabels,
+  sources,
+  onClose,
+  onChanged,
+  onDuplicate,
+  duplicating,
+  // Global sending kill switch, lifted to the app root (see App.jsx) and fed
+  // straight into CampaignStatus below, which is what actually renders it —
+  // this component just threads it through.
+  sendingEnabled,
+  sendingQueued,
+  sendingBusy,
+  onToggleSending,
+}) {
+  // Which sub-tab is showing. Only Flow needs "hide, don't unmount" treatment
+  // (see below) — Audience & Send and Results hold no state of their own that
+  // would be lost by unmounting; every piece of state they read lives here,
+  // in this component, regardless of which tab is on screen.
+  const [activeTab, setActiveTab] = useState("flow");
+  const [flowDirty, setFlowDirty] = useState(false);
+
   const [conditions, setConditions] = useState([]);
   const [preview, setPreview] = useState(null);
   const [previewedKey, setPreviewedKey] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [enrollResult, setEnrollResult] = useState(null);
+  // Whether the send-confirmation dialog is up. Decoupled from `busy` (which
+  // tracks the actual in-flight request) because opening the dialog is a
+  // synchronous click with no request behind it yet — the request only
+  // starts once the dialog's own confirm button is pressed.
+  const [showSendConfirm, setShowSendConfirm] = useState(false);
   // Whether the send being set up should also arm auto-enroll. Seeded from the
   // campaign so re-sending an already-armed campaign doesn't silently disarm
   // it, and re-synced because the panel stays mounted across reloads.
@@ -263,6 +375,12 @@ function CampaignDetail({ campaign, sourceLabels, sources, onClose, onChanged, o
   const [enrollments, setEnrollments] = useState({ enrollments: [], total: 0, totalPages: 1 });
   // The lead whose message timeline is open, if any.
   const [timelineFor, setTimelineFor] = useState(null);
+  // Campaign-wide breakdown of why enrollments are stuck, independent of the
+  // status filter/pager above (see fetchStuckLeadRollup) — null until the
+  // first fetch resolves, so "no rollup yet" and "rollup says nothing is
+  // stuck" (total === 0) are never conflated.
+  const [stuckRollup, setStuckRollup] = useState(null);
+  const [stuckRollupError, setStuckRollupError] = useState(null);
 
   const [membersPage, setMembersPage] = useState(1);
   const [members, setMembers] = useState({ members: [], total: 0, totalPages: 1 });
@@ -326,6 +444,20 @@ function CampaignDetail({ campaign, sourceLabels, sources, onClose, onChanged, o
       .catch(() => {});
   }, [campaign._id, statusFilter, page, enrollResult]);
 
+  // Refetched whenever the campaign changes or a new send lands (enrollResult)
+  // — not on statusFilter/page, since this rollup describes the whole
+  // campaign regardless of which slice of the table is showing.
+  useEffect(() => {
+    let cancelled = false;
+    setStuckRollupError(null);
+    fetchStuckLeadRollup(campaign._id)
+      .then((r) => !cancelled && setStuckRollup(r))
+      .catch((err) => !cancelled && setStuckRollupError(err.message));
+    return () => {
+      cancelled = true;
+    };
+  }, [campaign._id, enrollResult]);
+
   useEffect(() => setMembersPage(1), [filterKey]);
 
   useEffect(() => {
@@ -350,18 +482,21 @@ function CampaignDetail({ campaign, sourceLabels, sources, onClose, onChanged, o
     }
   }
 
-  async function handleSend() {
+  // Opens the task-2 dialog instead of sending straight away. Guarded the
+  // same way the button itself is (disabled without a fresh preview) so a
+  // stray call can't open a dialog with nothing to show.
+  function openSendConfirm() {
     if (!preview) return;
-    const confirmed = window.confirm(
-      `Send "${campaign.name}" to ${preview.willEnroll} ${sourceLabels[sourceId] || sourceId || "leads"}?\n\n` +
-        `${preview.matched} matched, ${preview.alreadyEnrolled} already enrolled, ` +
-        `${preview.skippedNoPhone + preview.skippedBadPhone} skipped (no/invalid phone).` +
-        (armAuto
-          ? `\n\nAuto-enroll ON — this segment keeps running, so anyone matching it later joins automatically.`
-          : "")
-    );
-    if (!confirmed) return;
+    setShowSendConfirm(true);
+  }
 
+  // The dialog's onConfirm: returning this promise is what puts the dialog
+  // into its pending state, so a slow send can't be double-fired from a
+  // second click on the dialog's own confirm button. Errors are caught here
+  // (not rethrown) so the dialog closes the same way on success or failure,
+  // surfacing the error in the page underneath rather than leaving the
+  // dialog stuck open.
+  async function confirmSend() {
     setError(null);
     setBusy(true);
     try {
@@ -377,27 +512,57 @@ function CampaignDetail({ campaign, sourceLabels, sources, onClose, onChanged, o
       setError(err.message);
     } finally {
       setBusy(false);
+      setShowSendConfirm(false);
     }
   }
 
+  // Bug fix (task 5, #22): this used to fire-and-forget with no try/catch and
+  // no in-flight state, so pausing a live campaign could fail silently — the
+  // button just sat there looking clickable while nothing happened. Given the
+  // same treatment as disarmAuto directly below: error surfaced, button
+  // disabled while the request is in flight. A dedicated busy/error pair
+  // (rather than reusing the segment-builder's `error`) because this action
+  // lives in the pinned header and has to report next to itself regardless of
+  // which sub-tab is showing — the segment builder's error paragraph is
+  // inside the Audience & Send panel and would be invisible from Results.
+  const [toggleBusy, setToggleBusy] = useState(false);
+  const [toggleError, setToggleError] = useState(null);
+
   async function toggleActive() {
-    await updateCampaign(campaign._id, { active: !campaign.active });
-    onChanged();
+    setToggleError(null);
+    setToggleBusy(true);
+    try {
+      await updateCampaign(campaign._id, { active: !campaign.active });
+      onChanged();
+    } catch (err) {
+      setToggleError(err.message);
+    } finally {
+      setToggleBusy(false);
+    }
   }
+
+  const [disarmBusy, setDisarmBusy] = useState(false);
 
   async function disarmAuto() {
     setError(null);
+    setDisarmBusy(true);
     try {
       await updateCampaign(campaign._id, { autoEnroll: false });
       onChanged();
     } catch (err) {
       setError(err.message);
+    } finally {
+      setDisarmBusy(false);
     }
   }
 
   const enrollmentColumns = [
     { key: "phone", header: "Phone", get: (d) => d.phone },
     { key: "status", header: "Drip", get: (d) => d.status },
+    // Why the engine parked this lead (statusReason) — blank for a lead that
+    // is progressing normally. See fetchStuckLeadRollup above for where the
+    // campaign-wide version of this same field is rolled up.
+    { key: "statusReason", header: "Reason", get: (d) => d.statusReason || "" },
     // What WhatsApp reported back, as opposed to how far the drip got.
     { key: "delivery", header: "Delivery", get: (d) => <DeliveryCell delivery={d.delivery} /> },
     { key: "replied", header: "Replied", get: (d) => (d.delivery?.replied || d.delivery?.received ? "yes" : "") },
@@ -408,8 +573,31 @@ function CampaignDetail({ campaign, sourceLabels, sources, onClose, onChanged, o
     { key: "createdAt", header: "Enrolled", get: (d) => (d.createdAt ? new Date(d.createdAt).toLocaleString() : "") },
   ];
 
+  // Bug fix (task 5, #22): Send used to go from "disabled" to "explained" only
+  // after the first preview ran — on first load it was just disabled, with no
+  // way to tell why. This covers every case Send can be disabled for (never
+  // previewed yet, or previewed against a segment that has since changed) so
+  // there is always a visible reason when there is one.
+  const sendDisabledReason =
+    previewedKey === null
+      ? "Preview this segment first — Send unlocks once a preview has run against it."
+      : previewedKey !== filterKey
+        ? "Segment changed — preview again before sending."
+        : null;
+
+  // CampaignStatus (task 3) needs the full detail shape — active, autoEnroll,
+  // liveVersion and every published version — to tell draft from published.
+  // `fullCampaign` carries that once it loads; until then this falls back to
+  // the list row, which has everything except `versions` (see GET
+  // /api/campaigns), so the strip still renders sensibly on first paint
+  // instead of waiting on a second fetch.
+  const statusCampaign = fullCampaign || campaign;
+
   return (
     <div className="panel">
+      {/* Pinned header: name, source/channel, the task-3 status strip, and the
+          Pause/Duplicate/Close actions. Rendered unconditionally above the
+          sub-tabs below, so it never moves when the active tab changes. */}
       <div className="step-card-head">
         <h3>
           {campaign.name}{" "}
@@ -419,8 +607,8 @@ function CampaignDetail({ campaign, sourceLabels, sources, onClose, onChanged, o
           </span>
         </h3>
         <div>
-          <button type="button" className="secondary-btn" onClick={toggleActive}>
-            {campaign.active ? "Pause" : "Resume"}
+          <button type="button" className="secondary-btn" onClick={toggleActive} disabled={toggleBusy}>
+            {toggleBusy ? "Working…" : campaign.active ? "Pause" : "Resume"}
           </button>{" "}
           {/* Clones this flow into a new, unpublished campaign with no
               enrollments and auto-enroll off, then opens it — the "same
@@ -435,156 +623,281 @@ function CampaignDetail({ campaign, sourceLabels, sources, onClose, onChanged, o
         </div>
       </div>
       {campaign.description && <p className="muted">{campaign.description}</p>}
-      {!campaign.active && <p className="notice">Paused — enrolled contacts won't receive further messages until resumed.</p>}
+      {toggleError && <p className="error">{toggleError}</p>}
 
-      {campaign.autoEnroll && (
-        <div className="notice">
-          <strong>Auto-enroll is on.</strong> The source is rescanned every few minutes for{" "}
-          <em>{describeFilter(campaign.autoEnrollFilter)}</em>, and anyone new who matches is enrolled and starts the
-          flow.{" "}
-          <button type="button" className="link-btn" onClick={disarmAuto}>
-            turn off
+      {/* Replaces the old standalone paused notice and auto-enroll notice —
+          both are now covered by this strip's badges and sentence, so they
+          are not repeated below. */}
+      <CampaignStatus
+        campaign={statusCampaign}
+        sendingEnabled={sendingEnabled}
+        sendingQueued={sendingQueued}
+        sendingBusy={sendingBusy}
+        onToggleSending={onToggleSending}
+      />
+
+      <div className="chip-row">
+        {DETAIL_TABS.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            className={`chip ${activeTab === t.id ? "active" : ""}`}
+            onClick={() => setActiveTab(t.id)}
+          >
+            {t.label}
+            {t.id === "flow" && flowDirty && (
+              // FlowCanvas computes this as "differs from the last *published*
+              // version", not "differs from the last save" — so a saved-but-
+              // unpublished draft keeps the dot lit. Labelled for what it
+              // actually tracks rather than for what it is not.
+              <span
+                className="campaign-subtab-dirty"
+                title="The canvas differs from the live published version"
+                aria-label="unpublished changes"
+              />
+            )}
           </button>
-          <br />
-          <span className="muted">
-            {campaign.lastAutoEnrollError
-              ? `Last check failed: ${campaign.lastAutoEnrollError}`
-              : campaign.lastAutoEnrollAt
-                ? `Last checked ${new Date(campaign.lastAutoEnrollAt).toLocaleString()} — added ${campaign.lastAutoEnrollCount || 0}.`
-                : "Not checked yet."}
-            {!campaign.active && " Paused, so rescanning is stopped too."}
-          </span>
+        ))}
+      </div>
+
+      {/* Flow sub-tab. Hidden with CSS instead of unmounted: the canvas holds
+          the graph in its own local node/edge state, and unmounting it on a
+          tab switch would silently throw away any unsaved edit — the exact
+          data-loss bug this restructure has to avoid. */}
+      <div className={activeTab === "flow" ? "campaign-subtab-panel" : "campaign-subtab-panel campaign-subtab-hidden"}>
+        {graphError && <p className="error">{graphError}</p>}
+        {fullCampaign ? (
+          <FlowCanvas
+            key={campaign._id}
+            campaignId={campaign._id}
+            initialNodes={(fullCampaign.draft && fullCampaign.draft.nodes) || []}
+            initialEdges={(fullCampaign.draft && fullCampaign.draft.edges) || []}
+            liveVersion={fullCampaign.liveVersion === undefined ? null : fullCampaign.liveVersion}
+            publishedNodes={livePublished.nodes}
+            publishedEdges={livePublished.edges}
+            sources={sources}
+            visible={activeTab === "flow"}
+            onDirtyChange={setFlowDirty}
+            onSaved={(updated) => {
+              setFullCampaign(updated);
+              onChanged();
+            }}
+            onPublished={(published) => {
+              setFullCampaign((prev) =>
+                prev && {
+                  ...prev,
+                  liveVersion: published.liveVersion,
+                  versions: [
+                    ...(prev.versions || []),
+                    { version: published.version, nodes: published.nodes, edges: published.edges, publishedAt: published.publishedAt },
+                  ],
+                }
+              );
+              onChanged();
+            }}
+          />
+        ) : (
+          !graphError && <p className="muted">Loading flow…</p>
+        )}
+      </div>
+
+      {activeTab === "audience" && (
+        <div className="campaign-subtab-panel">
+          <h4>Build a segment</h4>
+          {conditions.map((c, i) => (
+            <FilterCondition
+              key={i}
+              source={sourceId}
+              condition={c}
+              onChange={(next) => setConditions(conditions.map((cc, idx) => (idx === i ? next : cc)))}
+              onRemove={() => setConditions(conditions.filter((_, idx) => idx !== i))}
+            />
+          ))}
+          <button type="button" className="link-btn" onClick={() => setConditions([...conditions, { field: "", values: [] }])}>
+            + add condition
+          </button>
+          {!conditions.length && <p className="muted">No conditions — sending will target everyone in this source.</p>}
+
+          <h4>Matching members</h4>
+          <Pager page={members.page || membersPage} totalPages={members.totalPages} total={members.total} onChange={setMembersPage} />
+          <LeadsTable
+            columns={columns}
+            rows={members.members}
+            loading={false}
+            error={membersError}
+          />
+
+          {error && <p className="error">{error}</p>}
+
+          <div className="form-actions">
+            <button type="button" className="secondary-btn" onClick={handlePreview} disabled={busy}>
+              Preview
+            </button>
+            <button
+              type="button"
+              onClick={openSendConfirm}
+              disabled={busy || previewedKey !== filterKey}
+              title={sendDisabledReason || undefined}
+            >
+              Send campaign
+            </button>
+            <label className="inline-check">
+              <input type="checkbox" checked={armAuto} onChange={(e) => setArmAuto(e.target.checked)} />{" "}
+              Keep this segment running
+            </label>
+          </div>
+          <p className="muted">
+            {armAuto
+              ? "New matches in the source will join this campaign automatically — no need to send again."
+              : "One-off send: only who matches right now is enrolled. Anyone added to the source later is not."}
+          </p>
+
+          {preview && previewedKey === filterKey && (
+            <p className="muted">
+              {preview.matched} matched · {preview.willEnroll} will be enrolled · {preview.alreadyEnrolled} already enrolled ·{" "}
+              {preview.skippedNoPhone} skipped (no phone) · {preview.skippedBadPhone} skipped (invalid phone)
+            </p>
+          )}
+          {sendDisabledReason && <p className="muted">{sendDisabledReason}</p>}
+          {enrollResult && (
+            <p className="notice">
+              Enrolled {enrollResult.enrolled} contacts. They'll start the flow on the next send cycle.
+            </p>
+          )}
+
+          {/* The status strip in the header already says whether auto-enroll
+              is on, what it's scanning for and when it last ran — this is
+              just the control to turn an already-armed campaign off, kept
+              next to the "keep this segment running" option above since
+              they're the same lever at two different points in time. */}
+          {campaign.autoEnroll && (
+            <p className="muted">
+              Auto-enroll is currently on for this campaign.{" "}
+              <button type="button" className="link-btn" onClick={disarmAuto} disabled={disarmBusy}>
+                {disarmBusy ? "Turning off…" : "Turn off auto-enroll"}
+              </button>
+            </p>
+          )}
+
+          {showSendConfirm && preview && (
+            <ConfirmDialog
+              title={`Send "${campaign.name}"?`}
+              confirmLabel="Send campaign"
+              onConfirm={confirmSend}
+              onCancel={() => setShowSendConfirm(false)}
+            >
+              <p>Sending to {sourceLabels[sourceId] || sourceId || "leads"}.</p>
+              <dl className="detail-grid">
+                <div className="detail-row">
+                  <dt>Matched</dt>
+                  <dd>{preview.matched}</dd>
+                </div>
+                <div className="detail-row">
+                  <dt>Will enroll</dt>
+                  <dd>{preview.willEnroll}</dd>
+                </div>
+                <div className="detail-row">
+                  <dt>Already enrolled</dt>
+                  <dd>{preview.alreadyEnrolled}</dd>
+                </div>
+                <div className="detail-row">
+                  <dt>Skipped (no phone)</dt>
+                  <dd>{preview.skippedNoPhone}</dd>
+                </div>
+                <div className="detail-row">
+                  <dt>Skipped (invalid phone)</dt>
+                  <dd>{preview.skippedBadPhone}</dd>
+                </div>
+              </dl>
+              {armAuto && (
+                <p>
+                  Keep this segment running is on — this segment stays live, and anyone who matches it later joins
+                  this campaign automatically.
+                </p>
+              )}
+            </ConfirmDialog>
+          )}
         </div>
       )}
 
-      <h4>Flow</h4>
-      {graphError && <p className="error">{graphError}</p>}
-      {fullCampaign ? (
-        <FlowCanvas
-          key={campaign._id}
-          campaignId={campaign._id}
-          initialNodes={(fullCampaign.draft && fullCampaign.draft.nodes) || []}
-          initialEdges={(fullCampaign.draft && fullCampaign.draft.edges) || []}
-          liveVersion={fullCampaign.liveVersion === undefined ? null : fullCampaign.liveVersion}
-          publishedNodes={livePublished.nodes}
-          publishedEdges={livePublished.edges}
-          sources={sources}
-          onSaved={(updated) => {
-            setFullCampaign(updated);
-            onChanged();
-          }}
-          onPublished={(published) => {
-            setFullCampaign((prev) =>
-              prev && {
-                ...prev,
-                liveVersion: published.liveVersion,
-                versions: [
-                  ...(prev.versions || []),
-                  { version: published.version, nodes: published.nodes, edges: published.edges, publishedAt: published.publishedAt },
-                ],
-              }
-            );
-            onChanged();
-          }}
-        />
-      ) : (
-        !graphError && <p className="muted">Loading flow…</p>
+      {activeTab === "results" && (
+        <div className="campaign-subtab-panel">
+          <h4>Delivery</h4>
+          <DeliveryFunnel campaignId={campaign._id} refreshKey={enrollResult} />
+
+          {/* Delivery stops at the handset. This is the question after it:
+              once the message landed, did the lead actually go and use the
+              product. */}
+          <h4>Activity after this campaign</h4>
+          <CampaignActivity campaignId={campaign._id} refreshKey={enrollResult} />
+
+          {/* Campaign-wide, not page-scoped -- see fetchStuckLeadRollup above for
+              how that is achieved without a backend change. Renders nothing
+              at all (not an empty box) once loaded if nothing is stuck. */}
+          {stuckRollupError && (
+            <p className="error">Could not load the stuck-leads breakdown: {stuckRollupError}</p>
+          )}
+          {stuckRollup && stuckRollup.total > 0 && (
+            <div className="stuck-rollup">
+              <h4>Why leads are stuck ({stuckRollup.total} paused or failed, campaign-wide)</h4>
+              <ul className="stuck-rollup-list">
+                {stuckRollup.reasons.map((r) => (
+                  <li key={`${r.status} ${r.reason}`} className="stuck-rollup-row">
+                    <span className={`badge ${r.status === "failed" ? "badge-danger" : "badge-warning"}`}>{r.count}</span>
+                    <span className="stuck-rollup-reason">{r.reason}</span>
+                    <span className="muted">({r.status})</span>
+                  </li>
+                ))}
+              </ul>
+              {!stuckRollup.complete && (
+                <p className="muted">
+                  This campaign has more paused/failed leads than the breakdown scanned ({ROLLUP_MAX_PAGES * ROLLUP_PAGE_SIZE} per
+                  status) -- the {stuckRollup.total} total above is exact, but the reason counts below only cover what was
+                  scanned, not every one of them.
+                </p>
+              )}
+            </div>
+          )}
+
+          <h4>Enrollments</h4>
+          <select value={statusFilter} onChange={(e) => { setStatusFilter(e.target.value); setPage(1); }}>
+            <option value="">All statuses</option>
+            <option value="active">Active</option>
+            <option value="completed">Completed</option>
+            <option value="paused">Paused</option>
+            <option value="cancelled">Cancelled</option>
+            <option value="failed">Failed</option>
+          </select>
+          <Pager page={enrollments.page || page} totalPages={enrollments.totalPages} total={enrollments.total} onChange={setPage} />
+          <p className="muted">Click a lead to see every message event recorded for them.</p>
+          <LeadsTable
+            columns={enrollmentColumns}
+            rows={enrollments.enrollments}
+            loading={false}
+            error={null}
+            onRowClick={setTimelineFor}
+            activeRowId={timelineFor?._id}
+          />
+          {timelineFor && <EnrollmentTimeline enrollment={timelineFor} onClose={() => setTimelineFor(null)} />}
+        </div>
       )}
-
-      <h4>Build a segment</h4>
-      {conditions.map((c, i) => (
-        <FilterCondition
-          key={i}
-          source={sourceId}
-          condition={c}
-          onChange={(next) => setConditions(conditions.map((cc, idx) => (idx === i ? next : cc)))}
-          onRemove={() => setConditions(conditions.filter((_, idx) => idx !== i))}
-        />
-      ))}
-      <button type="button" className="link-btn" onClick={() => setConditions([...conditions, { field: "", values: [] }])}>
-        + add condition
-      </button>
-      {!conditions.length && <p className="muted">No conditions — sending will target everyone in this source.</p>}
-
-      <h4>Matching members</h4>
-      <Pager page={members.page || membersPage} totalPages={members.totalPages} total={members.total} onChange={setMembersPage} />
-      <LeadsTable
-        columns={columns}
-        rows={members.members}
-        loading={false}
-        error={membersError}
-      />
-
-      {error && <p className="error">{error}</p>}
-
-      <div className="form-actions">
-        <button type="button" className="secondary-btn" onClick={handlePreview} disabled={busy}>
-          Preview
-        </button>
-        <button type="button" onClick={handleSend} disabled={busy || previewedKey !== filterKey}>
-          Send campaign
-        </button>
-        <label className="inline-check">
-          <input type="checkbox" checked={armAuto} onChange={(e) => setArmAuto(e.target.checked)} />{" "}
-          Keep this segment running
-        </label>
-      </div>
-      <p className="muted">
-        {armAuto
-          ? "New matches in the source will join this campaign automatically — no need to send again."
-          : "One-off send: only who matches right now is enrolled. Anyone added to the source later is not."}
-      </p>
-
-      {preview && previewedKey === filterKey && (
-        <p className="muted">
-          {preview.matched} matched · {preview.willEnroll} will be enrolled · {preview.alreadyEnrolled} already enrolled ·{" "}
-          {preview.skippedNoPhone} skipped (no phone) · {preview.skippedBadPhone} skipped (invalid phone)
-        </p>
-      )}
-      {previewedKey !== null && previewedKey !== filterKey && (
-        <p className="muted">Segment changed — preview again before sending.</p>
-      )}
-      {enrollResult && (
-        <p className="notice">
-          Enrolled {enrollResult.enrolled} contacts. They'll start the flow on the next send cycle.
-        </p>
-      )}
-
-      <h4>Delivery</h4>
-      <DeliveryFunnel campaignId={campaign._id} refreshKey={enrollResult} />
-
-      {/* Delivery stops at the handset. This is the question after it: once
-          the message landed, did the lead actually go and use the product. */}
-      <h4>Activity after this campaign</h4>
-      <CampaignActivity campaignId={campaign._id} refreshKey={enrollResult} />
-
-      <h4>Enrollments</h4>
-      <select value={statusFilter} onChange={(e) => { setStatusFilter(e.target.value); setPage(1); }}>
-        <option value="">All statuses</option>
-        <option value="active">Active</option>
-        <option value="completed">Completed</option>
-        <option value="paused">Paused</option>
-        <option value="cancelled">Cancelled</option>
-        <option value="failed">Failed</option>
-      </select>
-      <Pager page={enrollments.page || page} totalPages={enrollments.totalPages} total={enrollments.total} onChange={setPage} />
-      <p className="muted">Click a lead to see every message event recorded for them.</p>
-      <LeadsTable
-        columns={enrollmentColumns}
-        rows={enrollments.enrollments}
-        loading={false}
-        error={null}
-        onRowClick={setTimelineFor}
-        activeRowId={timelineFor?._id}
-      />
-      {timelineFor && <EnrollmentTimeline enrollment={timelineFor} onClose={() => setTimelineFor(null)} />}
     </div>
   );
 }
 
 // --- Top-level tab --------------------------------------------------------
 
-export default function CampaignsTab({ focusCampaignId = null }) {
+export default function CampaignsTab({
+  focusCampaignId = null,
+  // Global sending kill switch, lifted to the app root (see App.jsx) so it is
+  // fetched exactly once and shared with the header toggle. Threaded straight
+  // through to CampaignDetail below, which feeds it to the CampaignStatus
+  // strip in its pinned header.
+  sendingEnabled = null,
+  sendingQueued = 0,
+  sendingBusy = false,
+  onToggleSending,
+}) {
   const [campaigns, setCampaigns] = useState([]);
   const [error, setError] = useState(null);
   const [showCreate, setShowCreate] = useState(false);
@@ -593,6 +906,11 @@ export default function CampaignsTab({ focusCampaignId = null }) {
   const [selectedId, setSelectedId] = useState(focusCampaignId);
   const [sources, setSources] = useState([]);
   const [deletingId, setDeletingId] = useState(null);
+  // The campaign the delete-confirm dialog is up for, if any. Holding the
+  // whole campaign (not just an id) means the dialog can render its
+  // enrollment breakdown straight from the list row already in hand, with no
+  // extra fetch.
+  const [deleteTarget, setDeleteTarget] = useState(null);
   const [duplicatingId, setDuplicatingId] = useState(null);
   // Per-campaign activation rollup, read from the lead magnet's own database.
   // Its own request rather than part of /api/campaigns: it crosses to a
@@ -637,32 +955,32 @@ export default function CampaignsTab({ focusCampaignId = null }) {
     }
   }
 
-  async function handleDelete(campaign) {
-    // Spell out the enrollments going with it. The count is the whole reason
-    // to hesitate — deleting a campaign mid-drip stops every lead in it.
-    const counts = campaign.enrollments || {};
-    const enrolled = Object.values(counts).reduce((n, v) => n + v, 0);
-    const breakdown = Object.entries(counts)
-      .filter(([, n]) => n)
-      .map(([status, n]) => `${n} ${status}`)
-      .join(", ");
+  // The count is the whole reason to hesitate over deleting — deleting a
+  // campaign mid-drip stops every lead in it. Kept as a plain helper (rather
+  // than inline in the dialog's JSX) so both the dialog body and the "no
+  // enrollments" fallback below read off the same numbers.
+  function deleteEnrollmentBreakdown(campaign) {
+    const counts = (campaign && campaign.enrollments) || {};
+    const total = Object.values(counts).reduce((n, v) => n + v, 0);
+    const breakdown = Object.entries(counts).filter(([, n]) => n);
+    return { total, breakdown };
+  }
 
-    const warning = enrolled
-      ? `Delete "${campaign.name}"? This also deletes its ${enrolled} enrollments (${breakdown}) — any lead still mid-drip stops receiving messages. Delivery history already recorded is kept. This cannot be undone.`
-      : `Delete "${campaign.name}"? This cannot be undone.`;
-    if (!window.confirm(warning)) return;
-
+  async function confirmDelete() {
+    const campaign = deleteTarget;
+    if (!campaign) return;
     setError(null);
     setDeletingId(campaign._id);
     try {
       await deleteCampaign(campaign._id);
       // The detail view would be showing a campaign that no longer exists.
       if (selectedId === campaign._id) setSelectedId(null);
-      reload();
+      await reload();
     } catch (err) {
       setError(err.message);
     } finally {
       setDeletingId(null);
+      setDeleteTarget(null);
     }
   }
 
@@ -684,6 +1002,7 @@ export default function CampaignsTab({ focusCampaignId = null }) {
   const sourceLabels = useMemo(() => Object.fromEntries(sources.map((s) => [s.value, s.label])), [sources]);
 
   const selected = campaigns.find((c) => c._id === selectedId);
+  const { total: deleteEnrolledTotal, breakdown: deleteBreakdown } = deleteEnrollmentBreakdown(deleteTarget);
 
   return (
     <div>
@@ -698,9 +1017,13 @@ export default function CampaignsTab({ focusCampaignId = null }) {
           {showCreate && (
             <CreateCampaignForm
               sources={sources}
-              onCreated={() => {
+              onCreated={(created) => {
                 setShowCreate(false);
-                reload();
+                // Land the admin on the new campaign's Flow tab (its default
+                // sub-tab) with the seeded source node already on the canvas,
+                // rather than back on the list - reload() first so `selected`
+                // below can actually find the freshly created campaign.
+                reload().then(() => setSelectedId(created._id));
               }}
               onCancel={() => setShowCreate(false)}
             />
@@ -801,7 +1124,7 @@ export default function CampaignsTab({ focusCampaignId = null }) {
                         disabled={deletingId === c._id}
                         onClick={(e) => {
                           e.stopPropagation();
-                          handleDelete(c);
+                          setDeleteTarget(c);
                         }}
                       >
                         {deletingId === c._id ? "Deleting…" : "Delete"}
@@ -825,7 +1148,41 @@ export default function CampaignsTab({ focusCampaignId = null }) {
           onChanged={reload}
           onDuplicate={handleDuplicate}
           duplicating={duplicatingId === selected._id}
+          sendingEnabled={sendingEnabled}
+          sendingQueued={sendingQueued}
+          sendingBusy={sendingBusy}
+          onToggleSending={onToggleSending}
         />
+      )}
+
+      {deleteTarget && (
+        <ConfirmDialog
+          title={`Delete "${deleteTarget.name}"?`}
+          confirmLabel="Delete campaign"
+          destructive
+          onConfirm={confirmDelete}
+          onCancel={() => setDeleteTarget(null)}
+        >
+          {deleteEnrolledTotal ? (
+            <>
+              <p>
+                This also deletes its {deleteEnrolledTotal} enrollment{deleteEnrolledTotal === 1 ? "" : "s"} — any
+                lead still mid-drip stops receiving messages. Delivery history already recorded is kept. This
+                cannot be undone.
+              </p>
+              <dl className="detail-grid">
+                {deleteBreakdown.map(([status, n]) => (
+                  <div className="detail-row" key={status}>
+                    <dt>{status}</dt>
+                    <dd>{n}</dd>
+                  </div>
+                ))}
+              </dl>
+            </>
+          ) : (
+            <p>This cannot be undone.</p>
+          )}
+        </ConfirmDialog>
       )}
     </div>
   );

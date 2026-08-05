@@ -1604,3 +1604,263 @@ select:focus-visible {
     animation: none !important;
   }
 }
+
+/* --- ConfirmDialog --------------------------------------------------------
+   The admin UI's first modal: replaces window.confirm on actions with real
+   consequences (sending a campaign, deleting one). Backdrop + centered panel,
+   built from the same surface/border/shadow tokens as .panel so it reads as
+   part of this app rather than a bolted-on library default. */
+
+.confirm-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.25rem;
+  background: rgba(6, 6, 17, 0.72);
+  backdrop-filter: blur(2px);
+}
+
+.confirm-dialog {
+  width: 100%;
+  max-width: 28rem;
+  max-height: calc(100vh - 2.5rem);
+  overflow-y: auto;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  padding: 1.375rem;
+  box-shadow: var(--shadow-md);
+}
+
+.confirm-dialog:focus-visible {
+  outline: none;
+}
+
+.confirm-dialog-title {
+  margin: 0 0 0.75rem;
+}
+
+.confirm-dialog-body {
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+.confirm-dialog-body p {
+  margin: 0 0 0.75rem;
+}
+
+.confirm-dialog-body p:last-child {
+  margin-bottom: 0;
+}
+
+.confirm-dialog-actions {
+  margin-top: 1.25rem;
+  justify-content: flex-end;
+}
+
+.confirm-dialog-confirm.destructive {
+  background: var(--danger);
+  border-color: var(--danger);
+}
+
+/* No lighter/darker danger token exists, so hover/active reuse var(--danger)
+   itself and lean on brightness() rather than introduce a new color. */
+.confirm-dialog-confirm.destructive:hover:not(:disabled) {
+  filter: brightness(1.12);
+}
+
+.confirm-dialog-confirm.destructive:active:not(:disabled) {
+  filter: brightness(0.92);
+}
+
+/* --- CampaignStatus --------------------------------------------------------
+   The status strip composing global sending, active/paused, published-vs-
+   draft and auto-enroll into badges plus one sentence. Reuses .notice and
+   the existing .badge-* classes throughout; no new colour literals here. */
+
+.campaign-status {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.campaign-status-sending-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.campaign-status-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.campaign-status-sentence {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+}
+
+.campaign-status-autoenroll-detail {
+  margin: 0;
+}
+
+/* --- Flow canvas validation (graphValidation.js wired into FlowCanvas) ----
+   Two grouped, counted lists rendered below the toolbar — errors first,
+   hidden entirely when the graph is clean. Every row that names a node is a
+   button that selects it on the canvas; a row with no node (e.g. "this flow
+   has no source node") is plain text instead. `.flow-gate-reason` is the
+   inline explanation shown next to Save/Publish whenever validation disables
+   one of them. */
+
+.flow-gate-reason {
+  margin: 0 0 0.5rem;
+}
+
+.flow-validation-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin-bottom: 0.75rem;
+}
+
+.flow-validation-group {
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  padding: 0.65rem 0.85rem;
+}
+
+.flow-validation-group-errors {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.flow-validation-group-warnings {
+  border-color: var(--warning);
+  background: var(--warning-soft);
+}
+
+.flow-validation-group-head {
+  margin: 0 0 0.4rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.flow-validation-group-errors .flow-validation-group-head {
+  color: var(--danger);
+}
+
+.flow-validation-group-warnings .flow-validation-group-head {
+  color: var(--warning);
+}
+
+.flow-validation-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.flow-validation-list .flow-validation-row {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0.35rem 0.5rem;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-size: 0.78125rem;
+  box-shadow: none;
+  cursor: pointer;
+  transition: border-color var(--ease), background var(--ease);
+}
+
+.flow-validation-list .flow-validation-row:hover:not(:disabled) {
+  border-color: var(--accent-border);
+  background: var(--bg-surface-2);
+}
+
+.flow-validation-list .flow-validation-row-static {
+  cursor: default;
+  color: var(--text-secondary);
+}
+
+.flow-validation-list .flow-validation-row-static:hover {
+  border-color: var(--border-soft);
+  background: var(--bg-inset);
+}
+
+/* --- Campaign detail sub-tabs (task 5, #22) ---------------------------
+   Reuses .chip-row/.chip (defined above, alongside .tabs/.tab) rather than
+   the top-level tab styling, so this reads as subordinate to the app's main
+   navigation. `.campaign-subtab-hidden` is what keeps the Flow panel out of
+   sight without unmounting it — see CampaignsTab.jsx for why unmounting it
+   on a tab switch would be a data-loss bug. */
+
+.campaign-subtab-panel {
+  margin-top: 0.25rem;
+}
+
+.campaign-subtab-hidden {
+  display: none;
+}
+
+.campaign-subtab-dirty {
+  display: inline-block;
+  width: 0.4rem;
+  height: 0.4rem;
+  margin-left: 0.4rem;
+  border-radius: 999px;
+  background: var(--warning);
+  vertical-align: middle;
+}
+
+/* --- Stuck-leads rollup (task 24, #24) ---------------------------------
+   Above the Results sub-tab's enrollments table: a campaign-wide breakdown
+   of paused/failed enrollments grouped by their recorded statusReason (see
+   fetchStuckLeadRollup in CampaignsTab.jsx). Reuses .badge/.badge-warning/
+   .badge-danger and .muted throughout; the only new rules are layout for
+   the list itself, built from existing spacing/border/surface tokens. */
+
+.stuck-rollup {
+  margin: 0.75rem 0 1rem;
+  padding: 0.75rem 1rem;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+}
+
+.stuck-rollup h4 {
+  margin: 0 0 0.5rem;
+}
+
+.stuck-rollup-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.stuck-rollup-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.stuck-rollup-reason {
+  color: var(--text-primary);
+  font-size: 0.875rem;
+}
