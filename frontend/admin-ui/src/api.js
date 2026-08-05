@@ -258,8 +258,23 @@ export function fetchMessageEventStats() {
 // size (an $in over a few hundred picked values is easily tens of KB) and
 // as a URL it blew past the server's header limit, failing with
 // "431 Request Header Fields Too Large" before the request was ever handled.
-export function fetchSegmentMembers(source, filter, page = 1) {
-  return sendJSON("POST", "/api/campaigns/meta/members", { source, page, filter: filter || {} });
+// phoneField names the raw field this source keeps phone numbers in (the
+// canonical `phone` key off the source node's map). Passing it opts each row
+// into a `_sessionWindow` annotation — whether that number can still be sent a
+// free-typed message. Omitted, the response is exactly what it was before.
+export function fetchSegmentMembers(source, filter, page = 1, phoneField = "") {
+  return sendJSON("POST", "/api/campaigns/meta/members", {
+    source,
+    page,
+    filter: filter || {},
+    ...(phoneField ? { phoneField } : {}),
+  });
+}
+
+// Everyone who can still be sent a free-typed message — derived from inbound
+// events, so it needs no arguments: the window belongs to the phone number.
+export function fetchSessionWindows() {
+  return getJSON("/api/session-windows");
 }
 
 export function fetchTemplates() {

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import ZohoTab from "./ZohoTab";
 import CampaignsTab from "./CampaignsTab";
 import MessageTrackingTab from "./MessageTrackingTab";
+import OpenWindowsTab from "./OpenWindowsTab";
 import IntegrationsTab from "./IntegrationsTab";
 import DataSourcesTab from "./DataSourcesTab";
 import LeadMagnetDataTab from "./LeadMagnetDataTab";
@@ -109,6 +110,13 @@ export default function App() {
         >
           Message Tracking
         </button>
+        <button
+          type="button"
+          className={`tab ${tab === "open-windows" ? "active" : ""}`}
+          onClick={() => setTab("open-windows")}
+        >
+          Open Windows
+        </button>
         <button type="button" className={`tab ${tab === "data-sources" ? "active" : ""}`} onClick={() => setTab("data-sources")}>
           Data Sources
         </button>
@@ -133,6 +141,7 @@ export default function App() {
         />
       )}
       {tab === "message-tracking" && <MessageTrackingTab />}
+      {tab === "open-windows" && <OpenWindowsTab />}
       {tab === "data-sources" && <DataSourcesTab onChanged={reloadDataSources} />}
       {tab === "integrations" && <IntegrationsTab />}
     </div>

@@ -1954,6 +1954,21 @@ select:focus-visible {
   margin-top: 0.6rem;
 }
 
+/* The "what this list is" line above the open-windows table. Wider than the
+   table's own notes because it explains a WhatsApp rule, not a number. */
+.open-windows-intro {
+  max-width: 62ch;
+  margin: 0.25rem 0 0.75rem;
+}
+
+/* How many of the rows below can still be sent a free-typed message. Sits
+   between the pager and the table because it describes that page, not the
+   whole source. */
+.audience-window-note {
+  margin: 0.35rem 0 0.5rem;
+  font-size: 0.875rem;
+}
+
 .audience-total {
   margin: 0.25rem 0 1rem;
   font-size: 1rem;

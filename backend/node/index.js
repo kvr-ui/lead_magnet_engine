@@ -48,6 +48,7 @@ const dataSourcesRouter = require("./routes/dataSources");
 const settingsRouter = require("./routes/settings");
 const watiRouter = require("./routes/wati");
 const messageEventsRouter = require("./routes/messageEvents");
+const sessionWindowsRouter = require("./routes/sessionWindows");
 const activityRouter = require("./routes/activity");
 const optOutsRouter = require("./routes/optOuts");
 const { startScheduler } = require("./lib/campaignEngine");
@@ -87,6 +88,9 @@ app.use("/api", requireAdminAuth, nodePresetsRouter);
 // Reads back what watiRouter's webhook writes. Behind admin auth on purpose —
 // the webhook itself can't be, but nothing that exposes the data should be.
 app.use("/api", requireAdminAuth, messageEventsRouter);
+// Who can still be sent a free-typed message right now — derived from the same
+// inbound events, so it is admin-only for the same reason.
+app.use("/api", requireAdminAuth, sessionWindowsRouter);
 // Reads the lead magnet's own database to say what leads did after a send.
 // Read-only across the connection, and admin-only like everything that
 // exposes lead data.

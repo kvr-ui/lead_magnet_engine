@@ -8,6 +8,8 @@ const whatsappProvider = require("../lib/whatsappProvider");
 const DataSourceConnection = require("../models/DataSourceConnection");
 const { getSourceFields, BUILT_IN_SOURCES, DYNAMIC_PREFIX, DOCUMENT_PROJECTION } = require("../lib/sourceFields");
 const { getSourceHandle, validateFilter } = require("../lib/sourceData");
+const { lastInboundFor, describeWindow } = require("../lib/sessionWindow");
+const { cleanPhone } = require("../lib/phone");
 const { asyncRouter } = require("../lib/asyncRouter");
 
 const router = asyncRouter();
@@ -117,7 +119,37 @@ async function membersHandler(req, res) {
     const limit = Math.min(parseInt(body.limit ?? req.query.limit, 10) || 50, 200);
 
     const { members, total } = await listMembers(source, filter, page, limit);
-    res.json({ members, total, page, pageSize: limit, totalPages: Math.max(1, Math.ceil(total / limit)) });
+
+    // 24-hour session window, annotated onto the page being shown rather than
+    // stored on the lead: the window belongs to the phone number and lives in
+    // the inbound message log (lib/sessionWindow.js), not in the source
+    // database, which has no idea whether anyone messaged us.
+    //
+    // Costs one aggregation for the whole page, not one per row. Only done
+    // when the caller says which field holds the phone — the canonical `phone`
+    // key off the source node's map, which this endpoint has no other way to
+    // know, since every source spells it differently.
+    const phoneField = body.phoneField || req.query.phoneField;
+    let windowOpenOnPage = 0;
+    if (phoneField) {
+      const lastInbound = await lastInboundFor(members.map((m) => m && m[phoneField]));
+      const now = new Date();
+      for (const member of members) {
+        const cleaned = cleanPhone(member && member[phoneField]);
+        const info = describeWindow(cleaned ? lastInbound.get(cleaned) || null : null, now);
+        member._sessionWindow = info;
+        if (info.open) windowOpenOnPage += 1;
+      }
+    }
+
+    res.json({
+      members,
+      total,
+      page,
+      pageSize: limit,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+      windowOpenOnPage: phoneField ? windowOpenOnPage : null,
+    });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

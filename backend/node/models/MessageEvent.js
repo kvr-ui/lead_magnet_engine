@@ -75,5 +75,12 @@ messageEventSchema.index(
 messageEventSchema.index({ enrollment: 1, receivedAt: -1 });
 messageEventSchema.index({ directMessage: 1, receivedAt: -1 });
 
+// "When did this number last message us?" — the 24-hour session window
+// (lib/sessionWindow.js). Ordered phone → status → receivedAt so the newest
+// inbound event for one number is an index seek rather than a scan of that
+// number's whole event history, which for an engaged lead is every delivery
+// and read receipt we ever recorded for them.
+messageEventSchema.index({ phone: 1, status: 1, receivedAt: -1 });
+
 module.exports = model("MessageEvent", messageEventSchema);
 module.exports.STATUSES = STATUSES;

@@ -48,6 +48,35 @@ const SKIP_ROWS = [
   { key: "skippedDuplicate", label: "skipped — already counted under another source" },
 ];
 
+// "6h left", "40m left" — enough to judge whether a lead is worth reaching now
+// without a countdown that implies more precision than the source data has.
+function formatRemaining(ms) {
+  const minutes = Math.floor(ms / 60000);
+  if (minutes < 60) return `${Math.max(1, minutes)}m left`;
+  return `${Math.floor(minutes / 60)}h left`;
+}
+
+/**
+ * Whether this lead can still be sent a free-typed message.
+ *
+ * Three states, not two, because "closed" and "has never messaged us at all"
+ * are different facts an admin acts on differently: the first reopens the
+ * moment they reply to anything, while the second has never been reachable
+ * outside a template and won't be until they make contact.
+ */
+function SessionWindowCell({ info }) {
+  if (!info) return <span className="muted">—</span>;
+  if (!info.everMessaged) return <span className="muted">Never messaged</span>;
+  if (!info.open) return <span className="muted">Closed</span>;
+  return <span className="badge badge-success">Open · {formatRemaining(info.msRemaining)}</span>;
+}
+
+const WINDOW_COLUMN = {
+  key: "_sessionWindow",
+  header: "24h window",
+  get: (doc) => <SessionWindowCell info={doc._sessionWindow} />,
+};
+
 /**
  * One source node's contribution to the send.
  *
@@ -63,14 +92,22 @@ function SourceAudienceCard({ counts, sourceLabel, entryLabel, canonicalMap }) {
   const [membersError, setMembersError] = useState(null);
   const [loading, setLoading] = useState(false);
 
-  const columns = useSourceColumns(open ? counts.sourceId : "", canonicalMap);
+  // The raw field this source keeps phone numbers in. Without it the backend
+  // cannot look up anyone's window — every source spells the field
+  // differently — so the column is simply not offered rather than shown empty.
+  const phoneField = (canonicalMap && canonicalMap.phone) || "";
+  const baseColumns = useSourceColumns(open ? counts.sourceId : "", canonicalMap);
+  const columns = useMemo(
+    () => (phoneField && baseColumns.length ? [...baseColumns, WINDOW_COLUMN] : baseColumns),
+    [baseColumns, phoneField]
+  );
 
   useEffect(() => {
     if (!open) return undefined;
     let cancelled = false;
     setLoading(true);
     setMembersError(null);
-    fetchSegmentMembers(counts.sourceId, counts.filter, page)
+    fetchSegmentMembers(counts.sourceId, counts.filter, page, phoneField)
       .then((d) => !cancelled && setMembers(d))
       .catch((err) => !cancelled && setMembersError(err.message))
       .finally(() => !cancelled && setLoading(false));
@@ -80,7 +117,7 @@ function SourceAudienceCard({ counts, sourceLabel, entryLabel, canonicalMap }) {
     // counts.filter is a fresh object each preview; its content is what
     // matters, so it is keyed by value.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, counts.sourceId, JSON.stringify(counts.filter), page]);
+  }, [open, counts.sourceId, JSON.stringify(counts.filter), page, phoneField]);
 
   const skips = SKIP_ROWS.filter((r) => counts[r.key] > 0);
 
@@ -124,6 +161,15 @@ function SourceAudienceCard({ counts, sourceLabel, entryLabel, canonicalMap }) {
                 total={members.total || 0}
                 onChange={setPage}
               />
+              {/* Scoped to the page on purpose. Counting open windows across the
+                  whole source would mean reading every lead in it; this number is
+                  the one the table below can actually be checked against. */}
+              {members.windowOpenOnPage != null && (members.members || []).length > 0 && (
+                <p className="muted audience-window-note">
+                  <strong>{members.windowOpenOnPage}</strong> of the {(members.members || []).length} shown can be
+                  sent a typed message right now — the rest need an approved template.
+                </p>
+              )}
               <LeadsTable columns={columns} rows={members.members || []} loading={loading} error={membersError} />
             </div>
           )}
