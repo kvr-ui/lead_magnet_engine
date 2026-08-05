@@ -25,6 +25,15 @@
 //   never blocks saving or publishing, it just tells the admin a lead reaching
 //   that node today would stall.
 //
+//   One deliberate exception: a "reply-text"/"button" condition with no
+//   upstream message node (missing, or no longer in the graph) or no values to
+//   match is an error, not a warning, even though the walker still only parks
+//   the lead for it. Unlike the config gaps above, and unlike "engagement"'s
+//   equivalent case, there is no way to configure either kind so it evaluates
+//   to a meaningful "no" — it can only ever be unset or throw — so treating it
+//   as a broken graph rather than a knowingly-accepted risk is the more honest
+//   signal.
+//
 // Nothing here re-derives a rule from first principles — if it isn't observed
 // backend behaviour, it isn't in this file.
 
@@ -106,6 +115,17 @@ function engagementStatusOf(config) {
 // ENGAGEMENT_STATUSES in campaignEngine.js. A status outside this set makes
 // evaluateEngagement throw, which parks the lead.
 const ENGAGEMENT_STATUSES = new Set(["sent", "delivered", "read", "replied", "failed"]);
+
+// Mirrors campaignEngine.js's configuredMatchValues(), which evaluateReplyText
+// and evaluateButton both read: `values` (or singular `value`) lists the
+// words/phrases/button labels to match, and an empty list makes either
+// evaluator throw outright rather than quietly answer "no".
+function hasMatchValues(config) {
+  const raw = config.values !== undefined ? config.values : config.value;
+  if (raw === undefined || raw === null) return false;
+  const list = Array.isArray(raw) ? raw : [raw];
+  return list.some((value) => value !== undefined && value !== null && String(value).trim() !== "");
+}
 
 // Which branches the walker asks pickEdge() for, per kind — "yes"/"no" for the
 // two that test something about the lead, "a"/"b" for a split.
@@ -402,6 +422,52 @@ export function validateGraph(graph) {
             pushWarning(warnings, node, `Condition "${name}" has no delivery status set.`);
           } else if (!ENGAGEMENT_STATUSES.has(status)) {
             pushWarning(warnings, node, `Condition "${name}" asks about an unsupported delivery status "${status}".`);
+          }
+        }
+
+        if (on === "reply-text" || on === "button") {
+          // Unlike "engagement" above, evaluateReplyText/evaluateButton in
+          // campaignEngine.js *throw* when either of these is missing (see
+          // "names no upstream message node to check" / "has no reply text or
+          // phrase / button label to match against") rather than quietly
+          // answering "no" — so, unlike engagement's equivalent checks, these
+          // are broken-graph errors that block publishing, not warnings an
+          // operator might knowingly accept.
+          const messageId = engagementNodeIdOf(config);
+          const referenced = messageId ? firstNodeById(messageId) : undefined;
+          const kindLabel = on === "button" ? "button tap" : "reply text";
+
+          if (!messageId) {
+            pushError(errors, node, `Condition "${name}" names no message to check the ${kindLabel} of.`);
+          } else if (!referenced) {
+            pushError(
+              errors,
+              node,
+              `Condition "${name}" asks about a message that is no longer in this flow.`
+            );
+          } else if (referenced.kind !== "message") {
+            // Same silent-"no" failure as engagement's equivalent case: the
+            // walker's history lookup simply finds nothing for a non-message
+            // node, so this one stays a warning rather than an error.
+            pushWarning(
+              warnings,
+              node,
+              `Condition "${name}" asks about "${displayName(referenced)}", which is a ${referenced.kind} node and never sends anything — every lead will take the "no" branch.`
+            );
+          } else if (reachableWithoutWait(node.id, messageId, incomingByNode, firstNodeById)) {
+            pushWarning(
+              warnings,
+              node,
+              `Condition "${name}" checks the ${kindLabel} of "${displayName(referenced)}" with no wait in between. Reply events arrive after the send, so every lead will take the "no" branch — add a wait node.`
+            );
+          }
+
+          if (!hasMatchValues(config)) {
+            pushError(
+              errors,
+              node,
+              `Condition "${name}" has no ${on === "button" ? "button labels" : "words or phrases"} to match against.`
+            );
           }
         }
 

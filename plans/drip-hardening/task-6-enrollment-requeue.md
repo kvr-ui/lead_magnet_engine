@@ -3,7 +3,7 @@ task: 6
 name: enrollment-requeue
 parallel_group: 2
 depends_on: [2]
-issue:
+issue: 34
 ---
 
 # Task 6: Requeue parked enrollments (API + stuck-leads UI)

@@ -3,7 +3,7 @@ task: 4
 name: node-visit-tracking
 parallel_group: 1
 depends_on: []
-issue:
+issue: 32
 ---
 
 # Task 4: Track per-node visits in CampaignNodeVisit

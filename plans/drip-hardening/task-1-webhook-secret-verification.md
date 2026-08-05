@@ -3,7 +3,7 @@ task: 1
 name: webhook-secret-verification
 parallel_group: 1
 depends_on: []
-issue:
+issue: 29
 ---
 
 # Task 1: Verify the webhook shared secret on inbound calls

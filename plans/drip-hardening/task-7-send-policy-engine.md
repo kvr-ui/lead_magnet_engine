@@ -3,7 +3,7 @@ task: 7
 name: send-policy-engine
 parallel_group: 2
 depends_on: [2]
-issue:
+issue: 35
 ---
 
 # Task 7: Global frequency cap and quiet hours

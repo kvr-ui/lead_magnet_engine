@@ -33,12 +33,17 @@ const historyEntrySchema = new Schema(
     // by anything that means *sends* specifically (GET /api/sends) rather than
     // "everything that happened".
     kind: { type: String, enum: ["message", "action"], default: "message" },
-    // Required for a message - a send with no template is not a send - and
-    // meaningless for an action, which references no template at all.
+    // Which of the two send shapes this was. Defaulted to "template" so every
+    // row written before free text existed reads back correctly, and so the
+    // send log can tell them apart without inferring it from a missing field.
+    messageType: { type: String, enum: ["template", "text"], default: "template" },
+    // Required for a template message - a template send with no template is not
+    // a send - and meaningless both for an action, which references no template
+    // at all, and for a free-text message, whose body IS the content.
     templateId: {
       type: String,
       required: function () {
-        return this.kind !== "action";
+        return this.kind !== "action" && this.messageType !== "text";
       },
     },
     sentAt: { type: Date, required: true },
@@ -105,6 +110,30 @@ const enrollmentSchema = new Schema(
     // condition that caused it. Without this a paused enrollment is a dead end
     // for whoever has to work out what went wrong.
     statusReason: { type: String, trim: true },
+    // Machine-readable twin of statusReason, for the handful of park reasons
+    // other code needs to act on. statusReason is prose for a human reading the
+    // enrollment table; matching on its wording would couple queries to message
+    // text. Currently only REASON_WINDOW_CLOSED is written (a free-text send
+    // blocked by a closed 24-hour window — see lib/campaignEngine.js), which is
+    // what lets lib/replyFlows.js find and resume exactly those rows when the
+    // lead's next inbound message re-opens the window. Written and cleared by
+    // applyWalkResult on every tick, same lifetime as statusReason.
+    statusReasonCode: { type: String, trim: true },
+    // How many consecutive times the message node currently sitting in
+    // currentNodeId has failed to send, since its last success. Reset to 0 the
+    // moment a send lands, so the streak never carries over onto a later node
+    // in the flow - see the message node's catch block and the reset right
+    // after a successful send in lib/campaignEngine.js. No migration needed:
+    // Mongoose applies this default when hydrating any existing document whose
+    // path is absent, the same way historyEntrySchema.kind's default above
+    // already does for rows written before that field existed.
+    sendAttempts: { type: Number, default: 0 },
+    // The lib/errorClassification.js bucket ("retryable" | "undeliverable" |
+    // "terminal") the most recent failed attempt fell into - null once a send
+    // has succeeded. Not an enum: the classifier is the one place that name
+    // list is allowed to grow, and pinning it again here would mean editing
+    // two files every time it does.
+    lastAttemptClass: { type: String, trim: true },
     nextSendAt: { type: Date, required: true, index: true },
     history: { type: [historyEntrySchema], default: [] },
   },
@@ -120,4 +149,12 @@ enrollmentSchema.index({ "history.providerMessageId": 1 });
 enrollmentSchema.index({ "history.providerLocalMessageId": 1 });
 enrollmentSchema.index({ phone: 1, updatedAt: -1 });
 
-module.exports = model("CampaignEnrollment", enrollmentSchema);
+const CampaignEnrollmentModel = model("CampaignEnrollment", enrollmentSchema);
+
+// The one statusReasonCode value in use: enrollment parked because a free-text
+// send needed an open 24-hour conversation window and there wasn't one. Lives
+// on the model (like Campaign.NODE_KINDS) so the engine that writes it and the
+// reply handler that queries it share one constant instead of a string literal.
+CampaignEnrollmentModel.REASON_WINDOW_CLOSED = "window-closed";
+
+module.exports = CampaignEnrollmentModel;

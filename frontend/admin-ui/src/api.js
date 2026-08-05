@@ -137,6 +137,37 @@ export function fetchEnrollments(id, status = "", page = 1, limit = null) {
   return getJSON(`/api/campaigns/${id}/enrollments?${params.toString()}`);
 }
 
+// GET /api/campaigns/:id/enrollments/stuck (task 6, #34) - a server-side
+// rollup of the campaign's paused/failed enrollments, grouped by status and
+// then by why: the window-closed park code for paused rows (with the same
+// legacy-prose fallback lib/replyFlows.js uses to find those rows), and task
+// 2's send-error classification (retryable/undeliverable/terminal) for
+// failed rows. Shape: { total, byStatus: { paused?: { count, byReason },
+// failed?: { count, byReason } } } - a status with nothing stuck is simply
+// absent from byStatus, not present at zero.
+export function fetchStuckEnrollments(id) {
+  return getJSON(`/api/campaigns/${id}/enrollments/stuck`);
+}
+
+// POST /api/campaigns/:id/enrollments/:enrollmentId/retry - put one parked
+// enrollment back in motion: status -> active, nextSendAt -> now, the
+// statusReason/statusReasonCode cleared, and the task-2 attempt counter
+// zeroed. currentNodeId and graphVersion are left alone server-side, so the
+// lead resumes exactly where it stopped rather than at the start of the flow.
+export function retryEnrollment(campaignId, enrollmentId) {
+  return sendJSON("POST", `/api/campaigns/${campaignId}/enrollments/${enrollmentId}/retry`, {});
+}
+
+// POST /api/campaigns/:id/enrollments/retry-bulk - the same reset applied to
+// every enrollment in `status` for this campaign, or just `ids` (still
+// filtered to that status, so an id list can never sweep up a
+// cancelled/completed row). Capped server-side at a few hundred per call;
+// the response's `capped` flag says whether `requeued` covers everything
+// that matched or just the first page of it - call again to keep going.
+export function retryEnrollmentsBulk(campaignId, { status, ids } = {}) {
+  return sendJSON("POST", `/api/campaigns/${campaignId}/enrollments/retry-bulk`, { status, ids });
+}
+
 // POST /api/campaigns/:id/publish - snapshot the campaign's current draft as
 // a new version and point liveVersion at it.
 export function publishCampaign(id) {
@@ -359,4 +390,32 @@ export function connectWhatsApp({ endpoint, token, channels }) {
 
 export function disconnectWhatsApp() {
   return sendJSON("POST", "/api/integrations/whatsapp/disconnect");
+}
+
+export function rotateWebhookSecret() {
+  return sendJSON("POST", "/api/integrations/whatsapp/rotate-secret");
+}
+
+// --- Account-wide send policy (task 11, #39) ----------------------------
+// A frequency cap + quiet-hours window enforced across every campaign for
+// one phone number, plus the manual-send toggle — see backend
+// lib/sendPolicy.js. GET always returns a complete, normalized policy;
+// POST is a partial patch validated server-side before it's saved.
+
+export function fetchSendPolicy() {
+  return getJSON("/api/settings/send-policy");
+}
+
+export function updateSendPolicy(patch) {
+  return sendJSON("POST", "/api/settings/send-policy", patch);
+}
+
+// --- Per-node funnel (task 10, task 13/#41) -----------------------------
+// Read-only aggregation for one campaign's one graph version — see
+// routes/messageEvents.js's nodeFunnel for exactly what each count means.
+// `graphVersion` is optional; omitting it lets the backend default to the
+// campaign's live version, same as the endpoint itself does.
+export function fetchNodeFunnel(campaignId, graphVersion) {
+  const query = graphVersion === undefined || graphVersion === null ? "" : `?graphVersion=${encodeURIComponent(graphVersion)}`;
+  return getJSON(`/api/campaigns/${campaignId}/node-funnel${query}`);
 }

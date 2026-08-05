@@ -27,4 +27,13 @@ router.post("/integrations/whatsapp/disconnect", async (_req, res) => {
   res.json({ connected: false });
 });
 
+router.post("/integrations/whatsapp/rotate-secret", async (_req, res) => {
+  try {
+    const status = await whatsappProvider.rotateWebhookSecret();
+    res.json(status);
+  } catch (err) {
+    res.status(400).json({ error: "Rotate failed", detail: err.message });
+  }
+});
+
 module.exports = router;

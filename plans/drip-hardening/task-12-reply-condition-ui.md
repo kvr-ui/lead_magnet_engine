@@ -3,7 +3,7 @@ task: 12
 name: reply-condition-ui
 parallel_group: 3
 depends_on: [9]
-issue:
+issue: 40
 ---
 
 # Task 12: Reply/button condition config UI + validation

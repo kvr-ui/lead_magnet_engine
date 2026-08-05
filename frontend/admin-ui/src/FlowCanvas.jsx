@@ -14,8 +14,17 @@ import {
 import "@xyflow/react/dist/base.css";
 import NodeConfigPanel from "./NodeConfigPanel";
 import { describeFilter } from "./FilterBuilder";
-import { updateCampaign, publishCampaign, fetchNodePresets, createNodePreset, updateNodePreset, deleteNodePreset } from "./api";
+import {
+  updateCampaign,
+  publishCampaign,
+  fetchNodePresets,
+  createNodePreset,
+  updateNodePreset,
+  deleteNodePreset,
+  fetchNodeFunnel,
+} from "./api";
 import { validateGraph } from "./graphValidation";
+import { funnelByNodeId, reachedById, edgeDropoff, NODE_VISIT_TRACKING_NOTE, otherVersionsNote } from "./flowFunnel";
 
 // Every node kind the schema defines. split/goal/action joined the palette once
 // their walker handlers landed and their config panels were built.
@@ -159,6 +168,30 @@ function graphsEqual(a, b) {
 
 // --- canvas node rendering ---------------------------------------------
 
+// The per-node funnel badge (task 10's aggregation, task 13/#41). Reached is
+// always shown — it's the one number every node kind can report, including
+// the decision kinds (filter/condition/split/goal/wait/source/exit) that
+// never write a history entry. Errored and parked-here only appear when
+// non-zero, the same "don't clutter a healthy node" rule the action-live
+// badge above already follows. Full figures and the two honesty caveats
+// (time origin, other graph versions) live in the notice above the canvas
+// and this title tooltip, never invented here.
+function FunnelBadges({ funnel }) {
+  if (!funnel) return null;
+  const { reached, error, parkedHere } = funnel;
+  const title =
+    `Reached: ${reached}` +
+    (error ? ` · Errored: ${error}` : "") +
+    (parkedHere ? ` · Parked here: ${parkedHere}` : "");
+  return (
+    <div className="flow-node-funnel" title={title}>
+      <span className="flow-node-funnel-chip flow-node-funnel-chip-reached">→ {reached}</span>
+      {error > 0 && <span className="flow-node-funnel-chip flow-node-funnel-chip-error">⚠ {error}</span>}
+      {parkedHere > 0 && <span className="flow-node-funnel-chip flow-node-funnel-chip-parked">⏸ {parkedHere}</span>}
+    </div>
+  );
+}
+
 function FlowNode({ data }) {
   const branches = TWO_HANDLE_KINDS[data.kind];
   return (
@@ -178,6 +211,7 @@ function FlowNode({ data }) {
       </div>
       <div className="flow-node-label">{data.label || `(unnamed ${data.kind})`}</div>
       {data.subtitle && <div className="flow-node-subtitle">{data.subtitle}</div>}
+      <FunnelBadges funnel={data.funnel} />
       {data.hasError && data.errorMessage && <div className="flow-node-error">{data.errorMessage}</div>}
       {branches ? (
         <div className="flow-node-branches">
@@ -380,6 +414,32 @@ function ValidationPanel({ errors, warnings, onSelectNode }) {
   );
 }
 
+// --- funnel notice -----------------------------------------------------
+// The two honesty requirements task 13/#41 calls out, surfaced once above the
+// canvas rather than repeated per node: the counts only cover activity since
+// node-visit tracking (task 4) shipped, and enrollments pinned to some other
+// graph version are named as a separate fact instead of being folded into any
+// node's badge. A fetch failure is reported the same way and nothing else
+// changes — the canvas underneath stays fully editable without numbers.
+function FunnelNotice({ funnel, funnelError, graphVersion }) {
+  if (funnelError) {
+    return (
+      <p className="flow-funnel-notice flow-funnel-notice-error muted">
+        Funnel counts unavailable ({funnelError}) — the flow is still fully editable, just without numbers on the nodes.
+      </p>
+    );
+  }
+  if (!funnel) return null;
+  const otherNote = otherVersionsNote(funnel);
+  return (
+    <p className="flow-funnel-notice muted">
+      Showing funnel counts for the published graph{graphVersion ? ` (v${graphVersion})` : ""} currently being viewed.{" "}
+      {NODE_VISIT_TRACKING_NOTE}
+      {otherNote ? ` ${otherNote}` : ""}
+    </p>
+  );
+}
+
 // --- the canvas itself ---------------------------------------------------
 
 function FlowCanvasInner({
@@ -409,6 +469,17 @@ function FlowCanvasInner({
   const [presetsLoading, setPresetsLoading] = useState(true);
   const [presetsError, setPresetsError] = useState(null);
   const [savingPreset, setSavingPreset] = useState(false);
+  // Task 10's per-node funnel, for the badges FlowNode renders (task 13/#41).
+  // Null until a fetch succeeds — covers "still loading", "never published
+  // so there's no live graph version to ask about", and "the fetch failed" in
+  // one falsy value, which is exactly the state that should render a node
+  // with no badge rather than a blank or broken one.
+  const [funnel, setFunnel] = useState(null);
+  const [funnelError, setFunnelError] = useState(null);
+  // Derived lookups used by both node badges and edge drop-off math below —
+  // declared here, ahead of renderNodes/renderEdges, since both read them.
+  const funnelMap = useMemo(() => funnelByNodeId(funnel), [funnel]);
+  const reachedMap = useMemo(() => reachedById(funnel), [funnel]);
   const { screenToFlowPosition, fitView } = useReactFlow();
   const wrapperRef = useRef(null);
   // A caller (CampaignDetail's Flow sub-tab) may keep this canvas mounted but
@@ -466,10 +537,32 @@ function FlowCanvasInner({
       nodes.map((n) => {
         const hasError = errorNodeIds.has(n.id);
         const errorMessage = errorMessageByNodeId.get(n.id);
-        if (n.data.hasError === hasError && n.data.errorMessage === errorMessage) return n;
-        return { ...n, data: { ...n.data, hasError, errorMessage } };
+        // Undefined (not 0) for a node the fetched graph version has nothing
+        // to say about — FunnelBadges renders nothing at all for that node
+        // rather than a misleading zero, the same way a never-published
+        // campaign or a failed fetch renders no badges anywhere.
+        const funnelNode = funnelMap.get(n.id);
+        if (n.data.hasError === hasError && n.data.errorMessage === errorMessage && n.data.funnel === funnelNode) return n;
+        return { ...n, data: { ...n.data, hasError, errorMessage, funnel: funnelNode } };
       }),
-    [nodes, errorNodeIds, errorMessageByNodeId]
+    [nodes, errorNodeIds, errorMessageByNodeId, funnelMap]
+  );
+
+  // Per-edge drop-off (task 13/#41): computed here, from the two connected
+  // nodes' own reached counts, so the node-funnel endpoint stays the "dumb
+  // counter" it was written to be and this component — which already owns
+  // the graph's topology — is what turns two node counts into an edge fact.
+  // A missing entry (no data for one side, or the source was never reached)
+  // leaves the edge exactly as it already renders, branch label and all.
+  const renderEdges = useMemo(
+    () =>
+      edges.map((e) => {
+        const drop = edgeDropoff(reachedMap, e.source, e.target);
+        if (!drop || drop.dropped <= 0) return e;
+        const label = e.label ? `${e.label} · ${drop.pct}% drop` : `${drop.pct}% drop`;
+        return { ...e, label };
+      }),
+    [edges, reachedMap]
   );
 
   const saveBlockedReason = useMemo(() => {
@@ -528,6 +621,44 @@ function FlowCanvasInner({
   useEffect(() => {
     loadPresets();
   }, [loadPresets]);
+
+  // Task 10's per-node funnel, for whichever graph version is currently
+  // being viewed. There's no version switcher on this canvas — it edits the
+  // draft against the backdrop of the live published graph — so "currently
+  // being viewed" is that live version; existing node ids carry over onto it
+  // unless a node was deleted, which is the same assumption the draft/live
+  // dirty check elsewhere on this canvas already makes. A campaign that has
+  // never been published has no live version to ask about, so nothing is
+  // fetched and every node simply renders without a badge — the same
+  // "no data yet" state a failed fetch produces, deliberately, rather than
+  // inventing a call that would 404.
+  //
+  // A failure here only ever sets funnelError for FunnelNotice to report; it
+  // never touches `error` (the save/publish error banner) or blocks
+  // anything else on the canvas — task 13's own requirement that a broken
+  // funnel fetch must leave the editor fully usable.
+  useEffect(() => {
+    if (!campaignId || localLiveVersion === null || localLiveVersion === undefined) {
+      setFunnel(null);
+      setFunnelError(null);
+      return;
+    }
+    let cancelled = false;
+    fetchNodeFunnel(campaignId, localLiveVersion)
+      .then((data) => {
+        if (cancelled) return;
+        setFunnel(data);
+        setFunnelError(null);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setFunnel(null);
+        setFunnelError(err.message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [campaignId, localLiveVersion]);
 
   const onDrop = useCallback(
     (event) => {
@@ -789,6 +920,8 @@ function FlowCanvasInner({
       {campaignId && saveBlockedReason && <p className="error flow-gate-reason">{saveBlockedReason}</p>}
       {campaignId && publishBlockedReason && <p className="error flow-gate-reason">{publishBlockedReason}</p>}
 
+      {campaignId && <FunnelNotice funnel={funnel} funnelError={funnelError} graphVersion={localLiveVersion} />}
+
       <ValidationPanel errors={validation.errors} warnings={validation.warnings} onSelectNode={selectNode} />
 
       <div className="flow-canvas-grid">
@@ -811,7 +944,7 @@ function FlowCanvasInner({
         <div className="flow-surface" ref={wrapperRef} onDrop={onDrop} onDragOver={onDragOver}>
           <ReactFlow
             nodes={renderNodes}
-            edges={edges}
+            edges={renderEdges}
             nodeTypes={NODE_TYPES}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}

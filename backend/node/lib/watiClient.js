@@ -6,6 +6,22 @@
  * credentials come from.
  */
 
+// Tagged with the structured fields lib/errorClassification.js reads —
+// httpStatus, providerErrorCode, providerResponse — instead of leaving the
+// caller to regex a status code back out of the message string, which is the
+// same convention lib/sendingSwitch.js's sendingDisabledError and
+// lib/whatsappProvider.js's notAllowlistedError/windowClosedError already
+// use for the errors they tag. providerErrorCode is best-effort: WATI's error
+// bodies aren't consistent about which key carries it, so every spelling seen
+// so far is checked.
+function sendError(message, httpStatus, data) {
+  const err = new Error(message);
+  err.httpStatus = httpStatus;
+  err.providerErrorCode = (data && (data.errorCode ?? data.error_code ?? data.code)) ?? undefined;
+  err.providerResponse = data;
+  return err;
+}
+
 // phone: digits only, with country code (e.g. "919876543210") — no "+".
 // params: ordered array of strings filling the template's {{1}}, {{2}}, ...
 // channelNumber: WhatsApp number to send from, e.g. "+916383514285" —
@@ -31,7 +47,35 @@ async function sendTemplateMessage({ endpoint, token, phone, templateName, broad
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data.result === false) {
     const detail = data.info || data.message || JSON.stringify(data);
-    throw new Error(`WATI send failed (${res.status}): ${detail}`);
+    throw sendError(`WATI send failed (${res.status}): ${detail}`, res.status, data);
+  }
+  return data;
+}
+
+// A free-typed ("session") message. Legal only inside the customer-initiated
+// 24-hour window, which is NOT checked here — lib/whatsappProvider.js owns that
+// gate, so every caller passes through it rather than each one remembering.
+//
+// WATI takes the number in the path and the body as a query parameter on this
+// endpoint, unlike sendTemplateMessage which takes a JSON body. Both shapes are
+// the provider's, not ours.
+async function sendSessionMessage({ endpoint, token, phone, text, channelNumber }) {
+  const query = new URLSearchParams({ messageText: String(text ?? "") });
+  if (channelNumber) query.set("channel_number", channelNumber);
+  const url = `${endpoint}/api/v1/sendSessionMessage/${encodeURIComponent(phone)}?${query.toString()}`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.result === false) {
+    const detail = data.info || data.message || JSON.stringify(data);
+    throw sendError(`WATI session send failed (${res.status}): ${detail}`, res.status, data);
   }
   return data;
 }
@@ -47,9 +91,9 @@ async function getMessageTemplates({ endpoint, token }) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const detail = data.info || data.message || JSON.stringify(data);
-    throw new Error(`WATI getMessageTemplates failed (${res.status}): ${detail}`);
+    throw sendError(`WATI getMessageTemplates failed (${res.status}): ${detail}`, res.status, data);
   }
   return (data.messageTemplates || []).map((t) => ({ name: t.elementName, status: t.status }));
 }
 
-module.exports = { sendTemplateMessage, getMessageTemplates };
+module.exports = { sendTemplateMessage, sendSessionMessage, getMessageTemplates };

@@ -5,6 +5,8 @@ const MessageEvent = require("../models/MessageEvent");
 const OptOut = require("../models/OptOut");
 const { cleanPhone } = require("../lib/phone");
 const { asyncRouter } = require("../lib/asyncRouter");
+const { handleInboundReply } = require("../lib/replyFlows");
+const { findBySecret } = require("../lib/whatsappProvider");
 
 const router = asyncRouter();
 
@@ -46,6 +48,35 @@ function extractLocalMessageId(body) {
 // lead's new message and matches nothing we sent.
 function extractReplyContextId(body) {
   return body.replyContextId ? String(body.replyContextId) : "";
+}
+
+// The raw payload `type` field — "button", "list", "text", or absent — which
+// is how a quick-reply tap is told apart from typed text; both otherwise land
+// identically in `text`. Deliberately reads `body.type` directly rather than
+// reusing extractEventType()'s fallback chain, since that fallback exists to
+// find an event *name* when eventType is missing, not to classify interaction
+// shape.
+function extractInteractiveType(body) {
+  return body.type ? String(body.type) : "";
+}
+
+// The tapped button/list option's machine-stable id — captured opportunistically
+// under whatever plausible field name happens to be present. UNCONFIRMED: the
+// one real captured button fixture in this repo carries no such field at all,
+// only { type: "button", text: "<button label>" }. Nothing downstream may
+// depend on this returning a value. Confirm the real field name by sending one
+// live quick-reply template and reading the `[wati/webhook] ... body:` log
+// line below, then tighten this function accordingly.
+function extractInteractivePayloadId(body) {
+  const raw =
+    body.buttonPayload ||
+    body.payloadId ||
+    body.replyId ||
+    body.button?.payload ||
+    body.interactive?.button_reply?.id ||
+    body.interactive?.list_reply?.id ||
+    body.listReply?.id;
+  return raw ? String(raw) : "";
 }
 
 // True for the events that announce a send we made ("templateMessageSent",
@@ -109,6 +140,29 @@ function matchStopKeyword(text) {
   return STOP_KEYWORDS.has(trimmed.toLowerCase()) ? trimmed : undefined;
 }
 
+// Marketing templates can carry WhatsApp's own built-in opt-out button.
+// UNCONFIRMED: "Stop promotions" is the standard label documented for that
+// button, but nothing in this repo's fixtures confirms WATI forwards it
+// verbatim rather than translating or relabelling it — confirm against a
+// real inbound button-opt-out event before relying on this in production.
+const MARKETING_OPT_OUT_BUTTON_LABELS = new Set(["stop promotions"].map((k) => k.toLowerCase()));
+
+// Requires the event to actually be a button tap (task 3's persisted
+// interactiveType, via extractInteractiveType) so typed text that merely
+// reads like a button label can't match through this path — that's what
+// matchStopKeyword() above is for. Label comparison is case- and
+// whitespace-normalised the same way matchStopKeyword() normalises keywords.
+// Returns the trimmed original label (for storing as OptOut.keyword) or
+// undefined.
+function matchMarketingOptOutButton(body) {
+  if (extractInteractiveType(body) !== "button") return undefined;
+  const text = extractText(body);
+  if (typeof text !== "string") return undefined;
+  const trimmed = text.trim();
+  if (!trimmed) return undefined;
+  return MARKETING_OPT_OUT_BUTTON_LABELS.has(trimmed.toLowerCase()) ? trimmed : undefined;
+}
+
 // Record the opt-out and cancel every active enrollment for this phone across
 // every campaign — opt-out is a global, per-phone concern, not a per-campaign
 // one, so this deliberately does not scope to whichever campaign/enrollment
@@ -119,12 +173,16 @@ async function recordOptOut(phone, keyword) {
     { $set: { source: "inbound-keyword", keyword }, $setOnInsert: { phone } },
     { upsert: true, setDefaultsOnInsert: true }
   );
+  // Paused rows are cancelled too, not just active ones: inbound replies now
+  // resume window-parked enrollments (lib/replyFlows.js), so a paused row left
+  // standing after a STOP would spring back to life on the phone's next
+  // non-STOP message. Belt and braces with the OptOut guard in replyFlows.
   const { modifiedCount } = await CampaignEnrollment.updateMany(
-    { phone, status: "active" },
+    { phone, status: { $in: ["active", "paused"] } },
     { $set: { status: "cancelled" } }
   );
   console.log(
-    `[wati/webhook] opt-out: ${phone} sent "${keyword}" — cancelled ${modifiedCount} active enrollment(s) across all campaigns`
+    `[wati/webhook] opt-out: ${phone} sent "${keyword}" — cancelled ${modifiedCount} active/paused enrollment(s) across all campaigns`
   );
 }
 
@@ -239,10 +297,24 @@ async function backfillDirectMessageIds(directMessage, providerMessageId, localM
 // POST /api/wati/webhook — WATI calls this on message status changes, replies,
 // and button clicks. Registered under Integrations > WhatsApp in the admin UI.
 //
-// This endpoint takes NO secret: any caller that reaches it can write a
-// MessageEvent. Nothing here is authenticated, so only expose it through the
-// webhook bridge (tools/webhook-bridge.js), never by tunnelling port 3000.
+// Authenticated with the shared secret generated on connect
+// (lib/whatsappProvider.js `connect()`), sent back by WATI as either
+// `?secret=` (baked into the webhook URL shown in Integrations) or an
+// `x-webhook-secret` header (used by tools/webhook-bridge.js). Checked before
+// any classification or persistence runs — an unauthenticated caller must not
+// be able to write a MessageEvent or, worse, forge a STOP opt-out.
 router.post("/wati/webhook", async (req, res) => {
+  const suppliedSecret = req.query.secret || req.headers["x-webhook-secret"] || "";
+  const integration = await findBySecret(suppliedSecret);
+  if (!integration) {
+    // Never log the supplied value itself — only its length, so a
+    // misconfigured operator is visible in the logs without leaking a
+    // near-miss secret. WATI retries on non-2xx, so this shows up promptly
+    // rather than as silent data loss.
+    console.warn(`[wati/webhook] rejected: invalid or missing secret (length=${String(suppliedSecret).length})`);
+    return res.status(401).json({ error: "invalid webhook secret" });
+  }
+
   const body = req.body || {};
   console.log(`[wati/webhook] ${new Date().toISOString()} body:`, JSON.stringify(body));
 
@@ -251,6 +323,8 @@ router.post("/wati/webhook", async (req, res) => {
   const providerMessageId = extractProviderMessageId(body);
   const localMessageId = extractLocalMessageId(body);
   const replyContextId = extractReplyContextId(body);
+  const interactiveType = extractInteractiveType(body);
+  const interactivePayloadId = extractInteractivePayloadId(body);
   const { enrollment, directMessage } = await findTarget({ phone, providerMessageId, localMessageId, replyContextId });
 
   if (isOutboundSendEvent(eventType)) {
@@ -267,6 +341,9 @@ router.post("/wati/webhook", async (req, res) => {
       eventType,
       status: normalizeStatus(body, eventType),
       providerMessageId: providerMessageId || undefined,
+      inReplyToProviderMessageId: replyContextId || undefined,
+      interactiveType: interactiveType || undefined,
+      interactivePayloadId: interactivePayloadId || undefined,
       text: extractText(body),
       failedCode: body.failedCode ? String(body.failedCode) : undefined,
       failedDetail: body.failedDetail,
@@ -287,7 +364,10 @@ router.post("/wati/webhook", async (req, res) => {
   // false` is the same "this is an inbound message from the lead" signal
   // normalizeStatus() uses to classify the event as "received"; ordinary
   // (non-STOP) inbound replies are completely unaffected by this block and
-  // continue to be recorded exactly as before via MessageEvent above.
+  // continue to be recorded exactly as before via MessageEvent above. Also
+  // catches a tap on a marketing template's built-in opt-out button
+  // (matchMarketingOptOutButton) — same signal, same recording path, just a
+  // button interaction instead of typed text.
   //
   // A non-2xx response here just makes WATI retry the same event, so a bug or
   // a transient DB error in opt-out processing must never surface as one —
@@ -295,11 +375,27 @@ router.post("/wati/webhook", async (req, res) => {
   // simply skipping opt-out processing for this one event.
   try {
     if (body.owner === false && phone) {
-      const keyword = matchStopKeyword(extractText(body));
+      const keyword = matchStopKeyword(extractText(body)) || matchMarketingOptOutButton(body);
       if (keyword) await recordOptOut(phone, keyword);
     }
   } catch (err) {
     console.error(`[wati/webhook] opt-out handling failed for ${phone || "unknown"}:`, err.message);
+  }
+
+  // Reply-driven flow control — same isolation rationale as the STOP block
+  // above: a bug here must never turn into a non-2xx that makes WATI redeliver.
+  // Re-checks the STOP keyword itself (the check is pure and cheap) so the two
+  // blocks stay independent: even if opt-out recording threw, a STOP message
+  // still never stops-with-outcome or resumes anything. Deliberately does NOT
+  // require text — a photo or voice note is still a reply, still re-opens the
+  // window, and should still count. All writes inside are idempotent, so a
+  // redelivered event is harmless.
+  try {
+    if (body.owner === false && phone && !matchStopKeyword(extractText(body))) {
+      await handleInboundReply(phone);
+    }
+  } catch (err) {
+    console.error(`[wati/webhook] reply-flow handling failed for ${phone || "unknown"}:`, err.message);
   }
 
   // WATI expects a 200 regardless of whether we matched an enrollment —

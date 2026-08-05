@@ -69,16 +69,24 @@ const NODE_KINDS = ["source", "filter", "message", "wait", "condition", "split",
  *   Same Mongo-ish filter shape as a source node's filter, applied mid-graph to
  *   narrow which leads continue past this point.
  *
- * `message` - { templateId, providerMeta, params: [{ index, from }] }
- *   templateId and providerMeta carry over unchanged in meaning from the old
- *   flat step: every message sent outside the customer-initiated 24h window
- *   must use a provider-approved template, so a message references a template
- *   by id rather than free-form text, and providerMeta carries whatever extra
- *   field the connected provider needs (e.g. WATI's required broadcast_name).
- *   params fills the template's variable slots: each entry's `index` is the
- *   variable position in the template and `from` names a canonical key (as
- *   produced by the enclosing source node's map) whose value is read off the
- *   lead at send time.
+ * `message` - { type, templateId, providerMeta, params: [{ index, from }], text }
+ *   type is "template" (the default, and the shape every graph published before
+ *   free text existed carries implicitly) or "text".
+ *
+ *   A "template" message references a provider-approved template by id, because
+ *   that is the only thing that may be sent outside the customer-initiated 24h
+ *   window. providerMeta carries whatever extra field the connected provider
+ *   needs (e.g. WATI's required broadcast_name). params fills the template's
+ *   variable slots: each entry's `index` is the variable position in the
+ *   template and `from` names a canonical key (as produced by the enclosing
+ *   source node's map) whose value is read off the lead at send time.
+ *
+ *   A "text" message carries its body in `text`, with {{canonicalKey}}
+ *   placeholders filled from the lead at send time. It is legal ONLY inside the
+ *   24h window, so it can be refused at the moment of sending however the graph
+ *   was drawn - lib/whatsappProvider.js checks and the walker parks the lead.
+ *   Putting a `condition` node with on: "window" in front of one is how a flow
+ *   routes closed-window leads to a template instead of parking them.
  *
  * `wait` - { amount, unit, window: { from, to, tz }, skipDays: [Number] }
  *   unit is one of "minutes", "hours", "days". window optionally clamps
@@ -86,9 +94,28 @@ const NODE_KINDS = ["source", "filter", "message", "wait", "condition", "split",
  *   optionally lists weekday numbers to skip entirely (0 = Sunday).
  *
  * `condition` - { on, ...per-kind args }
- *   on is one of "field", "engagement", "activity", "elapsed"; the remaining
- *   keys depend on which (a "field" condition needs a field/operator/value, an
- *   "elapsed" condition needs a duration, and so on). Left as Mixed on purpose
+ *   on is one of "field", "engagement", "activity", "elapsed", "window",
+ *   "reply", "reply-text", "button"; the remaining keys depend on which (a
+ *   "field" condition needs a field/operator/value, an "elapsed" condition
+ *   needs a duration, and so on).
+ *   "window" takes no args at all - it asks whether the lead's phone has an
+ *   open 24h conversation window, which has exactly one answer and no knobs.
+ *   "reply" - { since: "lastSend" | "start" } - asks whether the lead's phone
+ *   sent ANY inbound message since our last send (or since enrollment). It is
+ *   phone-based, unlike "engagement" with status "replied", which asks about
+ *   one specific message node's send and depends on provider message ids
+ *   being backfilled.
+ *   "reply-text" - { nodeId, values: [...], match: "contains" | "whole" } -
+ *   and "button" - { nodeId, values: [...], match } - ask what the lead's
+ *   reply to nodeId's send actually said or tapped, not just whether they
+ *   replied at all. Matched via the reply-context id the webhook persists
+ *   (inReplyToProviderMessageId) against the provider id on nodeId's own send,
+ *   falling back to engagement's time-window scoping when no provider id was
+ *   captured. "button" additionally requires the event's interactiveType to be
+ *   a button/list tap, not merely text that reads like one. values is checked
+ *   case- and whitespace-normalised, as a substring ("contains", the default)
+ *   or the whole value ("whole"/"exact").
+ *   Left as Mixed on purpose
  *   - enumerating every per-kind arg set as its own sub-schema would freeze
  *   shapes the walker still owns.
  *
@@ -226,6 +253,13 @@ const campaignSchema = new Schema(
     // Which versions[].version new enrollments pin to. Null until first publish.
     liveVersion: { type: Number, default: null },
     active: { type: Boolean, default: true },
+    // End a lead's drip the moment they send any inbound message: their
+    // enrollment is completed with outcome "replied" (see lib/replyFlows.js,
+    // driven from the WATI webhook). A campaign-level flag rather than a graph
+    // node so it applies instantly to every enrollment regardless of which
+    // pinned graphVersion it walks, and so it is enforced from the webhook
+    // like STOP handling — not something a graph shape can forget to wire in.
+    stopOnReply: { type: Boolean, default: false },
     // Re-run this campaign's segment on a schedule, so targets that appear in
     // the source *after* the manual "Send campaign" click still enter the drip.
     //

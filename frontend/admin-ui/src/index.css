@@ -1826,12 +1826,13 @@ select:focus-visible {
   vertical-align: middle;
 }
 
-/* --- Stuck-leads rollup (task 24, #24) ---------------------------------
+/* --- Stuck-leads rollup (task 24, #24; retry action added in task 6, #34) -
    Above the Results sub-tab's enrollments table: a campaign-wide breakdown
-   of paused/failed enrollments grouped by their recorded statusReason (see
-   fetchStuckLeadRollup in CampaignsTab.jsx). Reuses .badge/.badge-warning/
-   .badge-danger and .muted throughout; the only new rules are layout for
-   the list itself, built from existing spacing/border/surface tokens. */
+   of paused/failed enrollments grouped by why they're stuck (see
+   fetchStuckEnrollments in CampaignsTab.jsx/api.js), plus a "Retry all"
+   action that requeues them. Reuses .badge/.badge-warning/.badge-danger,
+   .secondary-btn and .muted throughout; the only new rules are layout for
+   the list and header, built from existing spacing/border/surface tokens. */
 
 .stuck-rollup {
   margin: 0.75rem 0 1rem;
@@ -1843,6 +1844,19 @@ select:focus-visible {
 
 .stuck-rollup h4 {
   margin: 0 0 0.5rem;
+}
+
+/* Houses the heading next to the task-6 "Retry all" action, so the button
+   sits beside the count instead of forcing its own row above the list. */
+.stuck-rollup-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.stuck-rollup-head h4 {
+  margin: 0;
 }
 
 .stuck-rollup-list {
@@ -2047,4 +2061,61 @@ select:focus-visible {
 
 .audience-success p {
   margin: 0 0 0.6rem;
+}
+
+/* Task 13/#41: per-node funnel badges on the flow canvas (task 10's
+   node-funnel endpoint). One compact row under a node's label/subtitle —
+   reached always shown since every node kind can report it, errored and
+   parked-here only when non-zero — styled as small pills in the same spirit
+   as the existing action-node live/disabled badge above, so a struggling
+   node reads at a glance across a graph of twenty without needing its
+   tooltip or panel open. */
+.flow-node-funnel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-top: 0.35rem;
+}
+
+.flow-node-funnel-chip {
+  padding: 0.05rem 0.3rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-inset);
+  color: var(--text-secondary);
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.flow-node-funnel-chip-reached {
+  background: var(--accent-soft);
+  border-color: var(--info);
+  color: var(--info);
+}
+
+.flow-node-funnel-chip-error {
+  background: var(--danger-soft);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.flow-node-funnel-chip-parked {
+  background: var(--warning-soft);
+  border-color: var(--warning);
+  color: var(--warning);
+}
+
+/* The notice above the canvas that states the funnel's time origin and
+   flags enrollments pinned to another graph version — the two honesty
+   requirements task 13/#41 calls out, said once here instead of per node. */
+.flow-funnel-notice {
+  margin: 0.3rem 0 0.6rem;
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.flow-funnel-notice-error {
+  font-style: italic;
 }
