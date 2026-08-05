@@ -54,6 +54,17 @@ function detailValue(value) {
 // manual send doesn't, so that section simply doesn't render for manual — the
 // rest is identical, and splitting it into two components would duplicate all
 // of it for one difference.
+// What to call a send in a one-line cell. A template names itself; a free-text
+// send has no name, so its body stands in — which is also the only place the
+// exact words that went to that lead are recoverable, since the body is
+// rendered per lead at send time.
+function sendLabel(row) {
+  if (row.messageType !== "text") return row.templateId;
+  const body = String(row.text || "").replace(/\s+/g, " ").trim();
+  if (!body) return <span className="muted">free text</span>;
+  return `“${body.length > 60 ? `${body.slice(0, 60)}…` : body}”`;
+}
+
 function SendDetail({ row, onClose }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
@@ -96,7 +107,7 @@ function SendDetail({ row, onClose }) {
     <div className="panel timeline-panel" ref={panel}>
       <div className="step-card-head">
         <h4>
-          {row.phone} <span className="muted">— {row.templateId}</span>
+          {row.phone} <span className="muted">— {sendLabel(row)}</span>
         </h4>
         <button type="button" className="secondary-btn" onClick={onClose}>
           Close
@@ -123,7 +134,10 @@ function SendDetail({ row, onClose }) {
                 row.kind === "campaign"
                   ? [data.campaign?.name || "Campaign", sendNodeLabel].filter(Boolean).join(" · ")
                   : "Manual",
-              Template: row.templateId,
+              Template: row.messageType === "text" ? null : row.templateId,
+              // Shown only for a free-text send, where it is the message
+              // itself rather than a detail about it.
+              "Message text": row.messageType === "text" ? row.text || send?.detail : null,
               "Sent at": row.sentAt ? new Date(row.sentAt).toLocaleString() : null,
               Status: send?.status || row.status,
               Error: send?.error,
@@ -202,7 +216,7 @@ function SendsFeed({ refreshKey }) {
 
   const columns = [
     { key: "phone", header: "Phone", get: (d) => d.phone },
-    { key: "templateId", header: "Template", get: (d) => d.templateId },
+    { key: "templateId", header: "Message", get: (d) => sendLabel(d) },
     {
       key: "source",
       header: "Source",

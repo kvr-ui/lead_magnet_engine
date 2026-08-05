@@ -31,6 +31,7 @@ function buildSentence({
   draftDiffers,
   liveVersion,
   autoEnroll,
+  stopOnReply,
   filterText,
 }) {
   const clauses = [];
@@ -64,6 +65,10 @@ function buildSentence({
   // on { autoEnroll: true, active: true } (see campaignEngine.js). Saying
   // "rescanning" for a paused campaign would claim work the backend is not
   // doing — and it is the paused case where an operator most needs the truth.
+  if (stopOnReply) {
+    clauses.push('a lead who replies is completed on the spot with outcome "replied" instead of dripping on');
+  }
+
   if (autoEnroll && !active) {
     clauses.push("auto-enroll is armed but paused with the campaign, so the source is not being rescanned");
   } else if (autoEnroll) {
@@ -109,6 +114,7 @@ export default function CampaignStatus({
     draftDiffers,
     liveVersion: campaign.liveVersion,
     autoEnroll: campaign.autoEnroll,
+    stopOnReply: campaign.stopOnReply,
     filterText,
   });
 
@@ -143,6 +149,8 @@ export default function CampaignStatus({
         {liveGraphKnown && draftDiffers && (
           <span className="badge badge-warning">Draft differs from v{campaign.liveVersion}</span>
         )}
+
+        {campaign.stopOnReply && <span className="badge badge-info">Stops on reply</span>}
 
         {campaign.autoEnroll && !campaign.active && (
           <span className="badge badge-neutral">Auto-enroll paused</span>

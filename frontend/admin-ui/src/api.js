@@ -99,9 +99,13 @@ export function fetchFilterFields(source) {
   return getJSON(`/api/campaigns/meta/fields?source=${encodeURIComponent(source)}`);
 }
 
-export function fetchFilterValues(source, field) {
-  const params = new URLSearchParams({ source, field });
-  return getJSON(`/api/campaigns/meta/values?${params.toString()}`);
+// `filter` narrows the counts to the segment being built, so the values offered
+// for one condition are counted within what the other conditions already
+// select. Posted rather than sent as a query string for the same reason the
+// members call is: a filter with a long $in list overflows the header limit and
+// comes back 431.
+export function fetchFilterValues(source, field, filter = {}) {
+  return sendJSON("POST", "/api/campaigns/meta/values", { source, field, filter });
 }
 
 // Neither of these takes a filter any more, and passing one is not merely

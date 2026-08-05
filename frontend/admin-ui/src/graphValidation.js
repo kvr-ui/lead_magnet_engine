@@ -169,6 +169,41 @@ function reachableWithoutWait(toId, fromId, incomingByNode, firstNodeById) {
   return false;
 }
 
+// The same default the walker and the config panel apply: anything that
+// doesn't say "text" is a template.
+function isFreeTextMessage(config) {
+  return String(config.type || config.messageType || "template").toLowerCase() === "text";
+}
+
+/**
+ * Is there a conversation-window condition anywhere upstream of this node?
+ *
+ * Answers "does this flow think about the window at all before sending free
+ * text", not "is this lead's window open" — that is only knowable at send time
+ * and lib/whatsappProvider.js is what actually enforces it. The whole walk back
+ * is searched, unlike reachableWithoutWait above, because a window check is
+ * still doing its job with any number of waits after it: a lead who was routed
+ * down the "yes" branch and then waited an hour may have had their window
+ * close, but that is a timing judgement the author made, not a flow they forgot
+ * to think about.
+ */
+function hasUpstreamWindowCondition(nodeId, incomingByNode, firstNodeById) {
+  const seen = new Set([nodeId]);
+  const queue = [nodeId];
+  while (queue.length) {
+    for (const prev of incomingByNode.get(queue.shift()) || []) {
+      if (seen.has(prev)) continue;
+      seen.add(prev);
+      const node = firstNodeById(prev);
+      if (node && node.kind === "condition" && String((node.config || {}).on || "").toLowerCase() === "window") {
+        return true;
+      }
+      queue.push(prev);
+    }
+  }
+  return false;
+}
+
 /**
  * Inspect a campaign flow graph and report what's wrong with it.
  *
@@ -280,7 +315,25 @@ export function validateGraph(graph) {
 
     switch (node.kind) {
       case "message":
-        if (!config.templateId) {
+        if (isFreeTextMessage(config)) {
+          if (isBlank(config.text)) {
+            pushWarning(warnings, node, `Message "${name}" is set to free text but has no text written — leads reaching it will fail to send.`);
+          }
+          // The quiet one: free text is refused outside the lead's 24-hour
+          // window, and the walker parks those leads rather than sending
+          // anything. Parked leads do resume on their own when the lead next
+          // messages us (the webhook re-activates them), but a lead who never
+          // replies waits forever. A flow with no window condition anywhere
+          // upstream therefore stalls most of its audience, and does it
+          // silently — the canvas looks exactly like a working flow.
+          if (!hasUpstreamWindowCondition(node.id, incomingByNode, firstNodeById)) {
+            pushWarning(
+              warnings,
+              node,
+              `Message "${name}" sends free text, which WhatsApp allows only within 24 hours of the lead's last reply. Nothing upstream checks the conversation window, so leads whose window is closed will be paused here until they next message us — add a "Conversation window" condition and send them a template on its "no" branch instead.`
+            );
+          }
+        } else if (!config.templateId) {
           pushWarning(warnings, node, `Message "${name}" has no template selected — leads reaching it will fail to send.`);
         }
         break;

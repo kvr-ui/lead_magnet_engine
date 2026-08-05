@@ -91,6 +91,9 @@ export default function LeadMagnetDataTab({ dataSourceId, label, onOpenCampaigns
           key={i}
           source={source}
           condition={c}
+          // Counted within the other conditions, same as the campaign builder —
+          // see the note there.
+          narrowBy={buildMongoFilter(conditions.filter((_, idx) => idx !== i))}
           onChange={(next) => setConditions(conditions.map((cc, idx) => (idx === i ? next : cc)))}
           onRemove={() => setConditions(conditions.filter((_, idx) => idx !== i))}
         />

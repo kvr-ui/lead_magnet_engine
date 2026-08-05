@@ -64,7 +64,18 @@ function subtitleFor(kind, config) {
   if (kind === "condition" && (c.on === "field" || !c.on) && c.filter && Object.keys(c.filter).length) {
     return describeFilter(c.filter);
   }
-  if (kind === "message" && c.templateId) return c.templateId;
+  if (kind === "condition" && String(c.on || "").toLowerCase() === "window") return "24h window open?";
+  if (kind === "message") {
+    // A free-text node has no template to name, so the body stands in for one.
+    // Trimmed hard: the canvas subtitle is one line, and a node that shows its
+    // whole message would push every node below it off the visible graph.
+    if (String(c.type || c.messageType || "").toLowerCase() === "text") {
+      const body = String(c.text || "").replace(/\s+/g, " ").trim();
+      if (!body) return "free text (empty)";
+      return body.length > 42 ? `“${body.slice(0, 42)}…”` : `“${body}”`;
+    }
+    if (c.templateId) return c.templateId;
+  }
   if (kind === "wait" && c.amount) return `${c.amount} ${c.unit || ""}`.trim();
   if (kind === "exit" && c.outcome) return c.outcome;
   if (kind === "source" && c.sourceId) return c.sourceId;

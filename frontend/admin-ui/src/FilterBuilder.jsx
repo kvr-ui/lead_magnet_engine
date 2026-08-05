@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fetchFilterFields, fetchFilterValues } from "./api";
 import { formatDisplayValue } from "./formatValue";
 
@@ -15,7 +15,13 @@ const COMPARISON_OPS = [
 // any value getSourceFields on the backend understands —
 // "Contact"/"Lead" or "datasource:<id>" for a
 // user-connected external collection.
-export function FilterCondition({ source, condition, onChange, onRemove }) {
+//
+// `narrowBy` is the filter the OTHER conditions in the same builder already
+// express. The counts on each chip are taken within it, so "how many CA
+// Intermediate leads sit the September attempt" is what the row answers rather
+// than "how many leads in the entire source do". Defaulted to {} so a caller
+// that doesn't pass it gets the old whole-source counts.
+export function FilterCondition({ source, condition, onChange, onRemove, narrowBy = {} }) {
   const [fields, setFields] = useState([]);
   const [values, setValues] = useState([]);
   const [loadingValues, setLoadingValues] = useState(false);
@@ -26,17 +32,45 @@ export function FilterCondition({ source, condition, onChange, onRemove }) {
       .catch(() => setFields([]));
   }, [source]);
 
+  // Serialized rather than passed as an object: the parent rebuilds this filter
+  // on every render, so a bare object would differ by identity each time and
+  // refetch forever.
+  const narrowKey = JSON.stringify(narrowBy || {});
+  // Held in a ref, not read as a dependency: the fetch needs the current
+  // selection to know which chips to keep alive, but selecting one must not
+  // itself trigger a refetch or every click would reload the row it was made in.
+  const selectedRef = useRef(condition.values);
+  selectedRef.current = condition.values;
+
   useEffect(() => {
     if (!condition.field) {
       setValues([]);
       return;
     }
+    let live = true;
     setLoadingValues(true);
-    fetchFilterValues(source, condition.field)
-      .then((d) => setValues(d.values))
-      .catch(() => setValues([]))
-      .finally(() => setLoadingValues(false));
-  }, [source, condition.field]);
+    fetchFilterValues(source, condition.field, JSON.parse(narrowKey))
+      .then((d) => {
+        if (!live) return;
+        // A value that narrows to zero is simply absent from the response, which
+        // is what keeps the row to real choices. One exception: a value already
+        // selected has to stay on screen at (0), or narrowing would make a chip
+        // vanish while it was still in the saved filter — invisible and
+        // impossible to click off.
+        const returned = new Set((d.values || []).map((v) => String(v.value)));
+        const orphaned = (selectedRef.current || [])
+          .filter((v) => !returned.has(String(v)))
+          .map((value) => ({ value, count: 0 }));
+        setValues([...(d.values || []), ...orphaned]);
+      })
+      .catch(() => live && setValues([]))
+      .finally(() => live && setLoadingValues(false));
+    // Ignore a response that arrives after the field or the narrowing changed:
+    // out of order, it would paint one field's values under another's heading.
+    return () => {
+      live = false;
+    };
+  }, [source, condition.field, narrowKey]);
 
   function toggleValue(v) {
     const selected = condition.values.includes(v)
@@ -46,6 +80,11 @@ export function FilterCondition({ source, condition, onChange, onRemove }) {
   }
 
   const isCompare = condition.cmp != null;
+
+  // A zero-count chip only earns its place while it is still selected. Once it
+  // is clicked off it is a choice that matches nobody, so it goes rather than
+  // sitting there as a dead "(0)" until the next fetch happens to drop it.
+  const shown = values.filter((v) => v.count > 0 || condition.values.includes(v.value));
 
   function setCompareMode(compare) {
     onChange(
@@ -83,8 +122,14 @@ export function FilterCondition({ source, condition, onChange, onRemove }) {
           {!isCompare && (
             <div className="value-chip-row">
               {loadingValues && <span className="muted">Loading values…</span>}
-              {!loadingValues && !values.length && <span className="muted">No values found for this field.</span>}
-              {values.map((v) => (
+              {!loadingValues && !shown.length && (
+                <span className="muted">
+                  {Object.keys(narrowBy || {}).length
+                    ? "No values for this field within the conditions above."
+                    : "No values found for this field."}
+                </span>
+              )}
+              {shown.map((v) => (
                 <button
                   type="button"
                   key={String(v.value)}

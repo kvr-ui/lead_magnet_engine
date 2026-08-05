@@ -40,6 +40,13 @@ function FilterEditor({ source, filter, onChange }) {
           key={i}
           source={source}
           condition={c}
+          // Every condition except this one, so each row's counts are taken
+          // within the segment the rest of them define. Built by the same
+          // function that builds the saved filter, so the numbers on the chips
+          // and the leads the filter actually selects can't drift apart. This
+          // row is left out on purpose: a field narrowed by its own selection
+          // would offer only the values already picked.
+          narrowBy={buildMongoFilter(conditions.filter((_, idx) => idx !== i))}
           onChange={(next) => update(conditions.map((cc, idx) => (idx === i ? next : cc)))}
           onRemove={() => update(conditions.filter((_, idx) => idx !== i))}
         />
@@ -196,6 +203,12 @@ function FilterPanel({ node, defaultFilterSource, onChangeConfig }) {
 
 // message node: which template, and which canonical key fills each of its
 // variable slots.
+// "template" unless the node says otherwise — the same default the walker
+// applies, so a graph drawn before free text existed reads back unchanged.
+function messageTypeOf(config) {
+  return String(config.type || config.messageType || "template").toLowerCase() === "text" ? "text" : "template";
+}
+
 function MessagePanel({ node, onChangeConfig, canonicalKeySuggestions }) {
   const config = node.config || {};
   const [templates, setTemplates] = useState([]);
@@ -213,7 +226,14 @@ function MessagePanel({ node, onChangeConfig, canonicalKeySuggestions }) {
 
   const params = config.params || [];
   const datalistId = `canonical-keys-${node.id}`;
+  const messageType = messageTypeOf(config);
 
+  function setMessageType(type) {
+    onChangeConfig({ ...config, type });
+  }
+  function setText(text) {
+    onChangeConfig({ ...config, text });
+  }
   function setTemplateId(templateId) {
     onChangeConfig({ ...config, templateId });
   }
@@ -235,53 +255,89 @@ function MessagePanel({ node, onChangeConfig, canonicalKeySuggestions }) {
     <div>
       {!connected && <p className="error">No WhatsApp provider connected — connect one from the Integrations tab.</p>}
       {templatesError && <p className="error">{templatesError}</p>}
+
       <label className="form-row">
-        Template
-        <select value={config.templateId || ""} onChange={(e) => setTemplateId(e.target.value)}>
-          <option value="">Pick a template…</option>
-          {templates.map((t) => (
-            <option key={t.id} value={t.id}>
-              {t.id}
-              {t.status ? ` (${t.status})` : ""}
-            </option>
-          ))}
+        Send as
+        <select value={messageType} onChange={(e) => setMessageType(e.target.value)}>
+          <option value="template">Approved template — reaches anyone, any time</option>
+          <option value="text">Free text — only inside the 24-hour window</option>
         </select>
       </label>
-      <label className="form-row">
-        Broadcast name
-        <input value={config.providerMeta?.broadcastName || ""} onChange={(e) => setBroadcastName(e.target.value)} />
-      </label>
 
-      <h4>Template parameters</h4>
-      <p className="muted">Map each template variable ({"{{1}}, {{2}}, …"}) to a canonical key from the source's field map.</p>
-      <datalist id={datalistId}>
-        {canonicalKeySuggestions.map((k) => (
-          <option value={k} key={k} />
-        ))}
-      </datalist>
-      {params.map((p, i) => (
-        <div className="param-row" key={i}>
-          <input
-            type="number"
-            min="1"
-            style={{ width: "4rem" }}
-            value={p.index}
-            onChange={(e) => updateParam(i, { index: Number(e.target.value) || 1 })}
-          />
-          <input
-            list={datalistId}
-            placeholder="canonical key (e.g. name)"
-            value={p.from || ""}
-            onChange={(e) => updateParam(i, { from: e.target.value })}
-          />
-          <button type="button" className="link-btn danger" onClick={() => removeParam(i)}>
-            remove
+      {messageType === "text" ? (
+        <>
+          <p className="muted">
+            WhatsApp allows a free-typed message only within 24 hours of the lead's last reply. Leads whose window has
+            closed are paused here rather than sent to, and resume automatically the next time the lead messages us —
+            but put a <strong>Conversation window</strong> condition in front of this node to route them to a template
+            instead of leaving them waiting.
+          </p>
+          <label className="form-row">
+            Message text
+            <textarea
+              rows={6}
+              value={config.text || ""}
+              placeholder={"Hi {{name}}, still stuck on the last question? Reply here and I'll help."}
+              onChange={(e) => setText(e.target.value)}
+            />
+          </label>
+          <p className="muted">
+            Use {"{{key}}"} to drop in a canonical key from the source's field map
+            {canonicalKeySuggestions.length ? ` (${canonicalKeySuggestions.slice(0, 6).join(", ")}…)` : ""}. A key the
+            lead has no value for renders as nothing.
+          </p>
+        </>
+      ) : (
+        <>
+          <label className="form-row">
+            Template
+            <select value={config.templateId || ""} onChange={(e) => setTemplateId(e.target.value)}>
+              <option value="">Pick a template…</option>
+              {templates.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.id}
+                  {t.status ? ` (${t.status})` : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="form-row">
+            Broadcast name
+            <input value={config.providerMeta?.broadcastName || ""} onChange={(e) => setBroadcastName(e.target.value)} />
+          </label>
+
+          <h4>Template parameters</h4>
+          <p className="muted">Map each template variable ({"{{1}}, {{2}}, …"}) to a canonical key from the source's field map.</p>
+          <datalist id={datalistId}>
+            {canonicalKeySuggestions.map((k) => (
+              <option value={k} key={k} />
+            ))}
+          </datalist>
+          {params.map((p, i) => (
+            <div className="param-row" key={i}>
+              <input
+                type="number"
+                min="1"
+                style={{ width: "4rem" }}
+                value={p.index}
+                onChange={(e) => updateParam(i, { index: Number(e.target.value) || 1 })}
+              />
+              <input
+                list={datalistId}
+                placeholder="canonical key (e.g. name)"
+                value={p.from || ""}
+                onChange={(e) => updateParam(i, { from: e.target.value })}
+              />
+              <button type="button" className="link-btn danger" onClick={() => removeParam(i)}>
+                remove
+              </button>
+            </div>
+          ))}
+          <button type="button" className="secondary-btn" onClick={addParam}>
+            + add parameter
           </button>
-        </div>
-      ))}
-      <button type="button" className="secondary-btn" onClick={addParam}>
-        + add parameter
-      </button>
+        </>
+      )}
     </div>
   );
 }
@@ -355,7 +411,7 @@ function WaitPanel({ node, onChangeConfig }) {
   );
 }
 
-// condition node: `config.on` picks which of four questions the node asks, and
+// condition node: `config.on` picks which of five questions the node asks, and
 // evaluateCondition() in lib/campaignEngine.js dispatches on it. Each kind
 // reads its own keys:
 //
@@ -367,15 +423,21 @@ function WaitPanel({ node, onChangeConfig }) {
 //                                       last messaged them
 //   elapsed    { since, days, hours } - how long since the drip started, or
 //                                       since the last send
+//   window     {}                     - is the lead's 24h conversation window
+//                                       open right now
+//   reply      { since }              - did the lead send us anything at all
+//                                       since our last send (or since enrolling)
 //
-// Only "field" had a form before. The other three were implemented in the
-// walker but unreachable from the canvas, which is what made a follow-up that
-// chases only the leads who *didn't* reply impossible to build here.
+// Only "field" had a form before. The others were implemented in the walker but
+// unreachable from the canvas, which is what made a follow-up that chases only
+// the leads who *didn't* reply impossible to build here.
 const CONDITION_KINDS = [
   { value: "field", label: "Lead field", hint: "compare a field on the lead record" },
   { value: "engagement", label: "Message engagement", hint: "did a message land, get read, or get a reply" },
+  { value: "reply", label: "Lead replied", hint: "any inbound message from the lead" },
   { value: "activity", label: "Product activity", hint: "did they use the lead magnet" },
   { value: "elapsed", label: "Time elapsed", hint: "how long since the drip started" },
+  { value: "window", label: "Conversation window", hint: "can we send free text right now" },
 ];
 
 // ENGAGEMENT_STATUSES in lib/campaignEngine.js, in funnel order. Each names a
@@ -511,6 +573,44 @@ function ConditionPanel({ node, messageNodes, defaultFilterSource, onChangeConfi
           <p className="muted">
             Numbers Meta refused come back as <em>Failed</em>, and never received the message at all. Branching those
             separately keeps them out of a follow-up meant for leads who saw it and stayed quiet.
+          </p>
+        </div>
+      )}
+
+      {on === "reply" && (
+        <div>
+          <p className="muted">
+            Leads who sent us anything at all — text, a photo, a voice note — take the “yes” branch; everyone else
+            takes “no”.
+          </p>
+          <label className="form-row">
+            Count replies since
+            <select value={String(config.since || "lastSend")} onChange={(e) => set({ since: e.target.value })}>
+              <option value="lastSend">the last message we sent</option>
+              <option value="start">the enrollment started</option>
+            </select>
+          </label>
+          <p className="muted">
+            Asked per phone number, like the conversation-window condition: a reply to any campaign or to the chatbot
+            counts. Use <strong>Message engagement</strong> instead when the question is “did they answer <em>that
+            specific message</em>”.
+          </p>
+        </div>
+      )}
+
+      {on === "window" && (
+        <div>
+          <p className="muted">
+            Leads who can be sent a free-typed message right now take the “yes” branch; everyone else takes “no”.
+            WhatsApp opens a 24-hour window when the lead messages us, and nothing else opens one — not an enrollment,
+            not a template we sent.
+          </p>
+          <p className="muted">
+            Asked per phone number, not per message: a reply to any campaign, or to the chatbot, keeps the window open
+            here too. Nothing to configure — the question has one answer.
+          </p>
+          <p className="muted">
+            The usual shape is “yes” → a free-text message, “no” → an approved template.
           </p>
         </div>
       )}

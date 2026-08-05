@@ -367,6 +367,25 @@ function CampaignDetail({
     }
   }
 
+  // Same busy/error treatment as toggleActive, for the same header-pinned
+  // reason. Reads off statusCampaign (the full detail fetch) rather than the
+  // list row, which predates the field on stale list payloads.
+  const [stopOnReplyBusy, setStopOnReplyBusy] = useState(false);
+  const [stopOnReplyError, setStopOnReplyError] = useState(null);
+
+  async function toggleStopOnReply(next) {
+    setStopOnReplyError(null);
+    setStopOnReplyBusy(true);
+    try {
+      await updateCampaign(campaign._id, { stopOnReply: next });
+      onChanged();
+    } catch (err) {
+      setStopOnReplyError(err.message);
+    } finally {
+      setStopOnReplyBusy(false);
+    }
+  }
+
   const enrollmentColumns = [
     { key: "phone", header: "Phone", get: (d) => d.phone },
     { key: "status", header: "Drip", get: (d) => d.status },
@@ -374,6 +393,11 @@ function CampaignDetail({
     // is progressing normally. See fetchStuckLeadRollup above for where the
     // campaign-wide version of this same field is rolled up.
     { key: "statusReason", header: "Reason", get: (d) => d.statusReason || "" },
+    // How the drip ended, for completed rows: an exit node's label, or
+    // "replied" when stop-on-reply completed it. Distinct from the Replied
+    // delivery column — that says the lead answered at some point; this says
+    // the reply is what ended their drip.
+    { key: "outcome", header: "Outcome", get: (d) => d.outcome || "" },
     // What WhatsApp reported back, as opposed to how far the drip got.
     { key: "delivery", header: "Delivery", get: (d) => <DeliveryCell delivery={d.delivery} /> },
     { key: "replied", header: "Replied", get: (d) => (d.delivery?.replied || d.delivery?.received ? "yes" : "") },
@@ -426,6 +450,26 @@ function CampaignDetail({
       </div>
       {campaign.description && <p className="muted">{campaign.description}</p>}
       {toggleError && <p className="error">{toggleError}</p>}
+
+      {/* Campaign-level rather than a node on the canvas, for the same reason
+          STOP handling is: a behaviour that must hold for every enrollment on
+          every published version can't depend on a graph shape remembering to
+          wire it in. Enforced from the WATI webhook the moment a reply
+          arrives, not on the next poll tick. */}
+      <label className="form-row" style={{ flexDirection: "row", alignItems: "center", gap: "0.5rem" }}>
+        <input
+          type="checkbox"
+          checked={Boolean(statusCampaign.stopOnReply)}
+          disabled={stopOnReplyBusy}
+          onChange={(e) => toggleStopOnReply(e.target.checked)}
+        />
+        Stop drip when the lead replies
+        <span className="muted">
+          — any inbound message ends their enrollment with outcome “replied”, so nobody keeps getting nurture messages
+          after they've already answered.
+        </span>
+      </label>
+      {stopOnReplyError && <p className="error">{stopOnReplyError}</p>}
 
       {/* Replaces the old standalone paused notice and auto-enroll notice —
           both are now covered by this strip's badges and sentence, so they
