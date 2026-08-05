@@ -72,12 +72,25 @@ function SendDetail({ row, onClose }) {
   // load so the panel is reached while it still says "Loading…".
   useEffect(() => {
     panel.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-  }, [row.kind, row.enrollmentId, row.directMessageId, row.stepIndex]);
+  }, [row.kind, row.enrollmentId, row.directMessageId, row.nodeId]);
 
-  // The send is the row the user clicked; for a campaign that's one step out of
-  // the enrollment's history, matched by step index.
-  const step = data?.enrollment?.history?.find((h) => h.stepIndex === row.stepIndex);
+  // The send is the row the user clicked; for a campaign that's one entry out
+  // of the enrollment's history, matched by the node it was sent from. History
+  // entries are keyed by nodeId now — there is no step index to match on, and
+  // a graph can revisit a node, so this is the only stable handle.
+  const step = data?.enrollment?.history?.find((h) => h.nodeId === row.nodeId);
   const send = row.kind === "campaign" ? step : data?.message;
+
+  // What to call the node this send came from: the label the sends feed
+  // already resolved, or the one the enrollment detail resolved against the
+  // pinned graph version. Both come from the backend; neither is derived here.
+  const sendNodeLabel = row.label || step?.label || null;
+
+  // How many nodes the graph this lead is walking actually has. The enrollment
+  // is pinned to the version it entered on, so the count comes from that
+  // snapshot rather than from the draft an admin may have edited since.
+  const pinnedVersion = (data?.campaign?.versions || []).find((v) => v.version === data?.enrollment?.graphVersion);
+  const nodeCount = (pinnedVersion?.nodes || data?.campaign?.draft?.nodes || []).length;
 
   return (
     <div className="panel timeline-panel" ref={panel}>
@@ -106,7 +119,10 @@ function SendDetail({ row, onClose }) {
           <h5>Send</h5>
           <DetailGrid
             fields={{
-              Source: row.kind === "campaign" ? `${data.campaign?.name || "Campaign"} · step ${row.stepIndex + 1}` : "Manual",
+              Source:
+                row.kind === "campaign"
+                  ? [data.campaign?.name || "Campaign", sendNodeLabel].filter(Boolean).join(" · ")
+                  : "Manual",
               Template: row.templateId,
               "Sent at": row.sentAt ? new Date(row.sentAt).toLocaleString() : null,
               Status: send?.status || row.status,
@@ -127,8 +143,19 @@ function SendDetail({ row, onClose }) {
               <DetailGrid
                 fields={{
                   Status: data.enrollment?.status,
-                  "Step reached": `${(data.enrollment?.currentStepIndex ?? 0) + 1} of ${data.campaign?.steps?.length ?? "?"}`,
-                  "Messages sent": data.enrollment?.history?.length,
+                  // Named, not numbered: the walker parks a lead on a node, and
+                  // a graph has no ordinal to report. currentNode is resolved
+                  // by GET /api/enrollments/:id against the pinned version.
+                  "Step reached": data.enrollment?.currentNode?.label
+                    ? `${data.enrollment.currentNode.label}${nodeCount ? ` — one of ${nodeCount} nodes` : ""}`
+                    : data.enrollment?.status === "completed"
+                      ? "Finished the flow"
+                      : "Not started",
+                  // History records everything that happened to this lead,
+                  // which since the action node landed is no longer only
+                  // sends — so this counts messages rather than entries.
+                  "Messages sent": (data.enrollment?.history || []).filter((h) => (h.kind || "message") === "message")
+                    .length,
                   "Next send": data.enrollment?.nextSendAt ? new Date(data.enrollment.nextSendAt).toLocaleString() : null,
                   Enrolled: data.enrollment?.createdAt ? new Date(data.enrollment.createdAt).toLocaleString() : null,
                 }}
@@ -179,12 +206,16 @@ function SendsFeed({ refreshKey }) {
     {
       key: "source",
       header: "Source",
-      // A campaign send names its campaign and which step it was; a manual one
-      // says so plainly rather than showing an empty cell.
+      // A campaign send names its campaign and the node it was sent from; a
+      // manual one says so plainly rather than showing an empty cell. The
+      // label is resolved by GET /api/sends against the graph version the
+      // enrollment is pinned to, and is absent only when that node has since
+      // been deleted from the graph.
       get: (d) =>
         d.kind === "campaign" ? (
           <>
-            {d.campaignName || "Campaign"} <span className="muted">· step {d.stepIndex + 1}</span>
+            {d.campaignName || "Campaign"}
+            {d.label && <span className="muted"> · {d.label}</span>}
           </>
         ) : (
           <span className="muted">Manual</span>

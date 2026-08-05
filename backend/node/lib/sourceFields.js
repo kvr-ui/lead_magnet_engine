@@ -1,12 +1,26 @@
 const Contact = require("../models/Contact");
 const Lead = require("../models/Lead");
-const { getAdMagnetConnection } = require("../db");
 
 // Field names never surfaced to the UI regardless of source: mongoose
-// internals, dynamic Map sub-paths, and (for AdMagnetStudent) OTP secrets.
+// internals, dynamic Map sub-paths, and the OTP secrets CA Guru's user
+// documents carry.
 const ALWAYS_EXCLUDED = new Set(["_id", "__v", "phoneOtp", "phoneOtpExpires"]);
 
 const DYNAMIC_PREFIX = "datasource:";
+
+// The built-in, code-level sources a campaign may target: the ones
+// getSourceFields() answers for by name rather than by DataSourceConnection
+// lookup. Exported so the API can *report* the selectable source list and the
+// admin UI can render whatever it is told, instead of keeping its own literal
+// copy of this pair — the copy that made a newly connected lead-magnet
+// database unselectable until someone edited the frontend.
+//
+// Every other source is a DataSourceConnection the admin connected, listed
+// alongside these by GET /api/campaigns/meta/sources.
+const BUILT_IN_SOURCES = [
+  { value: "Contact", label: "Zoho Contacts" },
+  { value: "Lead", label: "Lead Magnet Leads" },
+];
 
 function humanize(key) {
   const spaced = key.replace(/([a-z0-9])([A-Z])/g, "$1 $2");
@@ -20,8 +34,8 @@ function schemaFieldKeys(Model) {
 }
 
 // Discovers field names on a schemaless collection by sampling documents —
-// shared by AdMagnetStudent (the one pre-existing external source) and every
-// user-connected DataSourceConnection.
+// every user-connected DataSourceConnection goes through this, since none of
+// them has a schema here to read the field list off.
 async function sampleFieldKeys(collection, { excluded = ALWAYS_EXCLUDED, sampleSize = 300 } = {}) {
   const [result] = await collection
     .aggregate([
@@ -37,22 +51,9 @@ async function sampleFieldKeys(collection, { excluded = ALWAYS_EXCLUDED, sampleS
 
 // Cached briefly since this is called on every filter validation, not just
 // when the picker loads.
-let adMagnetCache = { keys: null, at: 0 };
 const CACHE_TTL_MS = 60_000;
 
-async function adMagnetStudentFieldKeys() {
-  if (adMagnetCache.keys && Date.now() - adMagnetCache.at < CACHE_TTL_MS) {
-    return adMagnetCache.keys;
-  }
-  const conn = getAdMagnetConnection();
-  if (!conn) return [];
-
-  const keys = await sampleFieldKeys(conn.db.collection("users"));
-  adMagnetCache = { keys, at: Date.now() };
-  return keys;
-}
-
-// One field-keys cache entry per connected data source, same TTL as above.
+// One field-keys cache entry per connected data source.
 const dynamicCache = new Map(); // id -> { keys, at }
 
 async function dynamicSourceFieldKeys(dataSourceId) {
@@ -85,14 +86,13 @@ async function dynamicSourceFieldKeys(dataSourceId) {
 // Returns [{ key, label }] for every real field on the given source, or null
 // for an unknown source. Used both to populate field-picker dropdowns and as
 // the whitelist for validating user-supplied filter keys before they reach a
-// MongoDB query. `source` is either a fixed name ("Contact"/"Lead"/
-// "AdMagnetStudent") or "datasource:<DataSourceConnection id>" for a
-// user-connected external collection.
+// MongoDB query. `source` is either a built-in name ("Contact"/"Lead") or
+// "datasource:<DataSourceConnection id>" for a user-connected external
+// collection.
 async function getSourceFields(source) {
   let keys;
   if (source === "Contact") keys = schemaFieldKeys(Contact);
   else if (source === "Lead") keys = schemaFieldKeys(Lead);
-  else if (source === "AdMagnetStudent") keys = await adMagnetStudentFieldKeys();
   else if (source && source.startsWith(DYNAMIC_PREFIX)) {
     keys = await dynamicSourceFieldKeys(source.slice(DYNAMIC_PREFIX.length));
     if (!keys) return null;
@@ -110,4 +110,12 @@ const DOCUMENT_PROJECTION = Object.fromEntries(
   [...ALWAYS_EXCLUDED].filter((key) => key !== "_id").map((key) => [key, 0])
 );
 
-module.exports = { getSourceFields, sampleFieldKeys, humanize, ALWAYS_EXCLUDED, DYNAMIC_PREFIX, DOCUMENT_PROJECTION };
+module.exports = {
+  getSourceFields,
+  sampleFieldKeys,
+  humanize,
+  ALWAYS_EXCLUDED,
+  BUILT_IN_SOURCES,
+  DYNAMIC_PREFIX,
+  DOCUMENT_PROJECTION,
+};

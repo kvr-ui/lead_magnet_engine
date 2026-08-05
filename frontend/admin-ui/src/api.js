@@ -86,6 +86,15 @@ export function deleteCampaign(id) {
   return sendJSON("DELETE", `/api/campaigns/${id}`);
 }
 
+// Every source a campaign can target, as the backend reports it: the built-in
+// ones plus every connected, active Data Source. The picker renders this
+// verbatim — there is deliberately no frontend-side list of sources to fall
+// back on, because that list is exactly what stopped a newly connected
+// lead-magnet database from being selectable without a code change.
+export function fetchCampaignSources() {
+  return getJSON("/api/campaigns/meta/sources");
+}
+
 export function fetchFilterFields(source) {
   return getJSON(`/api/campaigns/meta/fields?source=${encodeURIComponent(source)}`);
 }
@@ -110,6 +119,48 @@ export function fetchEnrollments(id, status = "", page = 1) {
   const params = new URLSearchParams({ page });
   if (status) params.set("status", status);
   return getJSON(`/api/campaigns/${id}/enrollments?${params.toString()}`);
+}
+
+// POST /api/campaigns/:id/publish - snapshot the campaign's current draft as
+// a new version and point liveVersion at it.
+export function publishCampaign(id) {
+  return sendJSON("POST", `/api/campaigns/${id}/publish`);
+}
+
+// GET /api/campaigns/:id/versions - publish history (counts only; the full
+// nodes/edges of a version come off GET /api/campaigns/:id).
+export function fetchCampaignVersions(id) {
+  return getJSON(`/api/campaigns/${id}/versions`);
+}
+
+// POST /api/campaigns/:id/duplicate - clone this campaign's draft graph into a
+// new, unpublished campaign with no enrollments and auto-enroll off. Returns
+// the new campaign, so the caller can open it and swap its source node.
+export function duplicateCampaign(id, body) {
+  return sendJSON("POST", `/api/campaigns/${id}/duplicate`, body || {});
+}
+
+// --- Node presets (reusable node configurations) -------------------------
+//
+// A preset is copied into a campaign's graph when it is inserted, never linked
+// to it: editing one below changes what the *next* insertion produces and
+// nothing already on any canvas. See backend models/NodePreset.js.
+
+export function fetchNodePresets(kind) {
+  const qs = kind ? `?kind=${encodeURIComponent(kind)}` : "";
+  return getJSON(`/api/node-presets${qs}`);
+}
+
+export function createNodePreset({ name, kind, config }) {
+  return sendJSON("POST", "/api/node-presets", { name, kind, config });
+}
+
+export function updateNodePreset(id, body) {
+  return sendJSON("PATCH", `/api/node-presets/${id}`, body);
+}
+
+export function deleteNodePreset(id) {
+  return sendJSON("DELETE", `/api/node-presets/${id}`);
 }
 
 // --- WhatsApp message tracking --------------------------------------

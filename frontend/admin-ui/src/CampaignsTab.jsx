@@ -1,17 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   fetchCampaigns,
+  fetchCampaign,
   createCampaign,
   updateCampaign,
   deleteCampaign,
+  duplicateCampaign,
   fetchSegmentMembers,
   fetchTemplates,
   fetchChannels,
   previewCampaignSend,
   enrollCampaign,
   fetchEnrollments,
-  fetchDataSources,
-  fetchDataSourceFields,
+  fetchCampaignSources,
+  fetchFilterFields,
   fetchActivitySummary,
 } from "./api";
 import LeadsTable from "./LeadsTable";
@@ -19,34 +21,89 @@ import Pager from "./Pager";
 import FilterCondition, { buildMongoFilter, describeFilter } from "./FilterBuilder";
 import { DeliveryFunnel, DeliveryCell, EnrollmentTimeline } from "./MessageDelivery";
 import CampaignActivity from "./LeadActivity";
+import FlowCanvas from "./FlowCanvas";
 
-const DYNAMIC_PREFIX = "datasource:";
-
-const STATIC_SOURCES = ["Contact", "Lead"];
-const STATIC_SOURCE_LABELS = { Contact: "Zoho Contacts", Lead: "Lead Magnet Leads" };
-
-const STATIC_SOURCE_COLUMNS = {
-  Contact: [
-    { key: "name", header: "Name", get: (d) => d.name },
-    { key: "phone", header: "Phone", get: (d) => d.phone },
-    { key: "caStatus", header: "CA Level", get: (d) => d.caStatus },
-    { key: "city", header: "City", get: (d) => d.city },
-    { key: "status", header: "Status", get: (d) => d.status },
-  ],
-  Lead: [
-    { key: "name", header: "Name", get: (d) => d.name },
-    { key: "phone", header: "Phone", get: (d) => d.phone },
-    { key: "email", header: "Email", get: (d) => d.email },
-    { key: "leadMagnet", header: "Lead Magnet", get: (d) => d.leadMagnet },
-  ],
-};
-
-function emptyStep() {
-  return { templateId: "", broadcastName: "" };
+function humanizeKey(key) {
+  const spaced = key.replace(/([a-z0-9])([A-Z])/g, "$1 $2");
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
 
-function toApiStep(step) {
-  return { templateId: step.templateId, providerMeta: { broadcastName: step.broadcastName } };
+/**
+ * What to call a campaign's source in the list.
+ *
+ * `sourceIds` is what the backend reads off the campaign's graph — a campaign
+ * has no single `targetModel` field any more, and a graph may feed from more
+ * than one source, so this is a list. `targetModel` is only consulted for rows
+ * written before campaigns became graphs. A campaign whose graph has no source
+ * node yet says so rather than rendering an empty cell that reads as a bug.
+ */
+function campaignSourceLabel(campaign, sourceLabels) {
+  const ids = campaign.sourceIds && campaign.sourceIds.length ? campaign.sourceIds : [campaign.targetModel];
+  const named = ids.filter(Boolean).map((id) => sourceLabels[id] || id);
+  if (!named.length) return <span className="muted">No source yet</span>;
+  return named.join(", ");
+}
+
+/**
+ * Preview/segment table columns for *any* source, built from what the backend
+ * reports about that source rather than from a per-source list written here.
+ *
+ * Two inputs, in this order:
+ *
+ *   1. The canonical keys the campaign's source node maps (`phone`, `name`,
+ *      whatever else it declared). These come first because they are the keys
+ *      every downstream node addresses a lead by, so they are the ones an
+ *      admin is actually reasoning about. Each reads the raw field the map
+ *      points at, so the column header says "Phone" while the value comes off
+ *      whatever the source calls it (`phoneNumber`, `mobile`, …).
+ *   2. Every remaining field the source actually has, per
+ *      /api/campaigns/meta/fields, minus the ones already shown as a canonical
+ *      key so a column never appears twice under two names.
+ *
+ * There is no per-source special case and no hardcoded column list anywhere in
+ * this file any more. Connecting a new lead-magnet database now renders its
+ * columns with no code change, which is the failure this whole plan exists to
+ * fix: previously a source with no hand-written entry rendered zero columns.
+ */
+function useSourceColumns(source, canonicalMap) {
+  const [fields, setFields] = useState(null);
+
+  useEffect(() => {
+    if (!source) {
+      setFields(null);
+      return undefined;
+    }
+    let cancelled = false;
+    setFields(null);
+    fetchFilterFields(source)
+      .then((d) => !cancelled && setFields(d.fields || []))
+      // A source whose fields can't be read (disconnected, bad credentials)
+      // still has to render its canonical columns rather than an empty table.
+      .catch(() => !cancelled && setFields([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [source]);
+
+  // Keyed on the map's content, not its identity — it is rebuilt from the
+  // campaign payload on every render and would otherwise recompute forever.
+  const mapKey = JSON.stringify(canonicalMap || {});
+
+  return useMemo(() => {
+    if (!fields) return [];
+    const canonical = Object.entries(JSON.parse(mapKey)).filter(([, field]) => field);
+    const mapped = new Set(canonical.map(([, field]) => field));
+    return [
+      ...canonical.map(([key, field]) => ({
+        key: `canonical:${key}`,
+        header: humanizeKey(key),
+        get: (doc) => doc[field],
+      })),
+      ...fields
+        .filter((f) => !mapped.has(f.key))
+        .map((f) => ({ key: f.key, header: f.label || f.key, get: (doc) => doc[f.key] })),
+    ];
+  }, [fields, mapKey]);
 }
 
 // --- Create campaign form ---------------------------------------------
@@ -54,24 +111,32 @@ function toApiStep(step) {
 function CreateCampaignForm({ sources, onCreated, onCancel }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [targetModel, setTargetModel] = useState("Contact");
+  // Seeded from whatever the backend offers first rather than from a source
+  // name written here, so this form has no opinion about which sources exist.
+  const [targetModel, setTargetModel] = useState("");
+  useEffect(() => {
+    setTargetModel((current) => current || (sources[0] && sources[0].value) || "");
+  }, [sources]);
   const [channelId, setChannelId] = useState("");
-  const [steps, setSteps] = useState([emptyStep()]);
+  // The flow being drawn on the canvas below, serialized straight into the
+  // shape campaign.draft expects (see FlowCanvas.jsx) and posted as the new
+  // campaign's initial draft on submit.
+  const [graph, setGraph] = useState({ nodes: [], edges: [] });
+  const [graphValid, setGraphValid] = useState(true);
   const [error, setError] = useState(null);
   const [saving, setSaving] = useState(false);
-  const [templates, setTemplates] = useState([]);
-  const [templatesError, setTemplatesError] = useState(null);
   const [channels, setChannels] = useState([]);
   const [channelsError, setChannelsError] = useState(null);
   const [providerConnected, setProviderConnected] = useState(true);
 
   useEffect(() => {
+    // Only used here to detect whether a provider is connected at all - the
+    // template list itself is fetched by FlowCanvas's own message node panel.
     fetchTemplates()
       .then((d) => {
-        setTemplates(d.templates);
         if (d.connected === false) setProviderConnected(false);
       })
-      .catch((err) => setTemplatesError(err.message));
+      .catch(() => {});
     fetchChannels()
       .then((d) => {
         setChannels(d.channels);
@@ -79,10 +144,6 @@ function CreateCampaignForm({ sources, onCreated, onCancel }) {
       })
       .catch((err) => setChannelsError(err.message));
   }, []);
-
-  function updateStep(i, patch) {
-    setSteps(steps.map((s, idx) => (idx === i ? { ...s, ...patch } : s)));
-  }
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -94,7 +155,7 @@ function CreateCampaignForm({ sources, onCreated, onCancel }) {
         description,
         targetModel,
         channelId,
-        steps: steps.map(toApiStep),
+        draft: graph,
       });
       onCreated();
     } catch (err) {
@@ -146,47 +207,11 @@ function CreateCampaignForm({ sources, onCreated, onCancel }) {
         </select>
       </label>
 
-      <h4>Steps</h4>
-      {steps.map((step, i) => (
-        <div className="step-card" key={i}>
-          <div className="step-card-head">
-            <strong>Step {i + 1}</strong>
-            {steps.length > 1 && (
-              <button type="button" className="link-btn" onClick={() => setSteps(steps.filter((_, idx) => idx !== i))}>
-                remove
-              </button>
-            )}
-          </div>
-
-          <label className="form-row">
-            Template name
-            {templatesError && <p className="error">{templatesError}</p>}
-            <select
-              value={step.templateId}
-              onChange={(e) => updateStep(i, { templateId: e.target.value })}
-              required
-            >
-              <option value="">Pick a template…</option>
-              {templates.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.id}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label className="form-row">
-            Broadcast name
-            <input value={step.broadcastName} onChange={(e) => updateStep(i, { broadcastName: e.target.value })} required />
-          </label>
-        </div>
-      ))}
-      <button type="button" className="secondary-btn" onClick={() => setSteps([...steps, emptyStep()])}>
-        + add step
-      </button>
+      <h4>Flow</h4>
+      <FlowCanvas sources={sources} onGraphChange={setGraph} onValidityChange={setGraphValid} />
 
       <div className="form-actions">
-        <button type="submit" disabled={saving}>
+        <button type="submit" disabled={saving || !graphValid}>
           {saving ? "Saving…" : "Create campaign"}
         </button>
         <button type="button" className="secondary-btn" onClick={onCancel}>
@@ -199,7 +224,7 @@ function CreateCampaignForm({ sources, onCreated, onCancel }) {
 
 // --- Campaign detail: filter, preview, send, enrollments -----------------
 
-function CampaignDetail({ campaign, sourceLabels, onClose, onChanged }) {
+function CampaignDetail({ campaign, sourceLabels, sources, onClose, onChanged, onDuplicate, duplicating }) {
   const [conditions, setConditions] = useState([]);
   const [preview, setPreview] = useState(null);
   const [previewedKey, setPreviewedKey] = useState(null);
@@ -212,6 +237,27 @@ function CampaignDetail({ campaign, sourceLabels, onClose, onChanged }) {
   const [armAuto, setArmAuto] = useState(Boolean(campaign.autoEnroll));
   useEffect(() => setArmAuto(Boolean(campaign.autoEnroll)), [campaign._id, campaign.autoEnroll]);
 
+  // The campaign list's row only carries nodeCount/versionCount (see
+  // GET /api/campaigns) - the flow canvas below needs the actual draft graph
+  // and the full versions[] (to know what's currently live), so those are
+  // fetched separately, once per campaign shown.
+  const [fullCampaign, setFullCampaign] = useState(null);
+  const [graphError, setGraphError] = useState(null);
+  useEffect(() => {
+    setFullCampaign(null);
+    fetchCampaign(campaign._id)
+      .then(setFullCampaign)
+      .catch((err) => setGraphError(err.message));
+  }, [campaign._id]);
+
+  const livePublished = useMemo(() => {
+    if (!fullCampaign || fullCampaign.liveVersion === null || fullCampaign.liveVersion === undefined) {
+      return { nodes: [], edges: [] };
+    }
+    const entry = (fullCampaign.versions || []).find((v) => v.version === fullCampaign.liveVersion);
+    return entry ? { nodes: entry.nodes || [], edges: entry.edges || [] } : { nodes: [], edges: [] };
+  }, [fullCampaign]);
+
   const [statusFilter, setStatusFilter] = useState("");
   const [page, setPage] = useState(1);
   const [enrollments, setEnrollments] = useState({ enrollments: [], total: 0, totalPages: 1 });
@@ -222,20 +268,54 @@ function CampaignDetail({ campaign, sourceLabels, onClose, onChanged }) {
   const [members, setMembers] = useState({ members: [], total: 0, totalPages: 1 });
   const [membersError, setMembersError] = useState(null);
 
-  const [dynamicColumns, setDynamicColumns] = useState(null);
-  useEffect(() => {
-    if (!campaign.targetModel.startsWith(DYNAMIC_PREFIX)) {
-      setDynamicColumns(null);
-      return;
+  // The canonical field map feeding this campaign's preview table: the map on
+  // The source node this panel reads through, and with it both the source id
+  // and the canonical field map.
+  //
+  // The graph is the source of truth. A campaign has no `targetModel` field of
+  // its own any more — the source moved onto the source node when campaigns
+  // became graphs — so it is consulted only as a fallback, for rows written
+  // before that change. A graph may hold several source nodes (one per lead
+  // magnet); this panel shows the first, matching the legacy field when one is
+  // there to match.
+  const owningSourceNode = useMemo(() => {
+    const sourceNodes = ((fullCampaign && fullCampaign.draft && fullCampaign.draft.nodes) || []).filter(
+      (n) => n.kind === "source"
+    );
+    return sourceNodes.find((n) => n.config && n.config.sourceId === campaign.targetModel) || sourceNodes[0] || null;
+  }, [fullCampaign, campaign.targetModel]);
+
+  const sourceId =
+    (owningSourceNode && owningSourceNode.config && owningSourceNode.config.sourceId) ||
+    (campaign.sourceIds && campaign.sourceIds[0]) ||
+    campaign.targetModel ||
+    "";
+  const canonicalMap = (owningSourceNode && owningSourceNode.config && owningSourceNode.config.map) || {};
+
+  const columns = useSourceColumns(sourceId, canonicalMap);
+
+  // nodeId -> label for each published version, so an enrollment row can name
+  // the node it is parked on. Keyed by version as well as by id because an
+  // enrollment walks the version it entered on: the same node id can carry a
+  // different label in a later version, and showing today's label for a lead
+  // walking last week's graph would be a lie. Built from the campaign payload
+  // already fetched for the canvas above — a flat id->label lookup, not a walk
+  // of the graph, and no extra request.
+  const labelByVersion = useMemo(() => {
+    const out = new Map();
+    for (const v of (fullCampaign && fullCampaign.versions) || []) {
+      out.set(v.version, new Map((v.nodes || []).map((n) => [n.id, n.label || n.id])));
     }
-    const id = campaign.targetModel.slice(DYNAMIC_PREFIX.length);
-    fetchDataSourceFields(id)
-      .then((d) =>
-        setDynamicColumns(d.fields.map((f) => ({ key: f.key, header: f.label || f.key, get: (doc) => doc[f.key] })))
-      )
-      .catch(() => setDynamicColumns([]));
-  }, [campaign.targetModel]);
-  const columns = campaign.targetModel.startsWith(DYNAMIC_PREFIX) ? dynamicColumns || [] : STATIC_SOURCE_COLUMNS[campaign.targetModel];
+    return out;
+  }, [fullCampaign]);
+
+  function currentNodeLabel(enrollment) {
+    if (!enrollment.currentNodeId) return "";
+    const byId = labelByVersion.get(enrollment.graphVersion);
+    // Falls back to the raw id for a node deleted since, or for a version that
+    // hasn't loaded yet — never to a number, which a graph has none of.
+    return (byId && byId.get(enrollment.currentNodeId)) || enrollment.currentNodeId;
+  }
 
   const filter = buildMongoFilter(conditions);
   const filterKey = JSON.stringify(filter);
@@ -250,10 +330,11 @@ function CampaignDetail({ campaign, sourceLabels, onClose, onChanged }) {
 
   useEffect(() => {
     setMembersError(null);
-    fetchSegmentMembers(campaign.targetModel, filter, membersPage)
+    if (!sourceId) return;
+    fetchSegmentMembers(sourceId, filter, membersPage)
       .then(setMembers)
       .catch((err) => setMembersError(err.message));
-  }, [campaign.targetModel, filterKey, membersPage]);
+  }, [sourceId, filterKey, membersPage]);
 
   async function handlePreview() {
     setError(null);
@@ -272,7 +353,7 @@ function CampaignDetail({ campaign, sourceLabels, onClose, onChanged }) {
   async function handleSend() {
     if (!preview) return;
     const confirmed = window.confirm(
-      `Send "${campaign.name}" to ${preview.willEnroll} ${sourceLabels[campaign.targetModel] || campaign.targetModel}?\n\n` +
+      `Send "${campaign.name}" to ${preview.willEnroll} ${sourceLabels[sourceId] || sourceId || "leads"}?\n\n` +
         `${preview.matched} matched, ${preview.alreadyEnrolled} already enrolled, ` +
         `${preview.skippedNoPhone + preview.skippedBadPhone} skipped (no/invalid phone).` +
         (armAuto
@@ -320,7 +401,9 @@ function CampaignDetail({ campaign, sourceLabels, onClose, onChanged }) {
     // What WhatsApp reported back, as opposed to how far the drip got.
     { key: "delivery", header: "Delivery", get: (d) => <DeliveryCell delivery={d.delivery} /> },
     { key: "replied", header: "Replied", get: (d) => (d.delivery?.replied || d.delivery?.received ? "yes" : "") },
-    { key: "currentStepIndex", header: "Step", get: (d) => d.currentStepIndex + 1 },
+    // Where the lead is in the flow. A graph has no step numbers, so this
+    // names the node instead of counting one off.
+    { key: "currentNodeId", header: "Step", get: (d) => currentNodeLabel(d) },
     { key: "nextSendAt", header: "Next Send", get: (d) => (d.nextSendAt ? new Date(d.nextSendAt).toLocaleString() : "") },
     { key: "createdAt", header: "Enrolled", get: (d) => (d.createdAt ? new Date(d.createdAt).toLocaleString() : "") },
   ];
@@ -331,13 +414,20 @@ function CampaignDetail({ campaign, sourceLabels, onClose, onChanged }) {
         <h3>
           {campaign.name}{" "}
           <span className="muted">
-            — {sourceLabels[campaign.targetModel] || campaign.targetModel} · sends from{" "}
+            — {sourceLabels[sourceId] || sourceId || "no source yet"} · sends from{" "}
             {campaign.channelId ? campaign.channelId : "Default channel"}
           </span>
         </h3>
         <div>
           <button type="button" className="secondary-btn" onClick={toggleActive}>
             {campaign.active ? "Pause" : "Resume"}
+          </button>{" "}
+          {/* Clones this flow into a new, unpublished campaign with no
+              enrollments and auto-enroll off, then opens it — the "same
+              nurture sequence, new lead magnet" path: duplicate, swap the
+              source node, publish. */}
+          <button type="button" className="secondary-btn" onClick={() => onDuplicate(campaign)} disabled={duplicating}>
+            {duplicating ? "Duplicating…" : "Duplicate flow"}
           </button>{" "}
           <button type="button" className="secondary-btn" onClick={onClose}>
             Close
@@ -350,7 +440,8 @@ function CampaignDetail({ campaign, sourceLabels, onClose, onChanged }) {
       {campaign.autoEnroll && (
         <div className="notice">
           <strong>Auto-enroll is on.</strong> The source is rescanned every few minutes for{" "}
-          <em>{describeFilter(campaign.autoEnrollFilter)}</em>, and anyone new who matches is enrolled and sent step 1.{" "}
+          <em>{describeFilter(campaign.autoEnrollFilter)}</em>, and anyone new who matches is enrolled and starts the
+          flow.{" "}
           <button type="button" className="link-btn" onClick={disarmAuto}>
             turn off
           </button>
@@ -366,11 +457,45 @@ function CampaignDetail({ campaign, sourceLabels, onClose, onChanged }) {
         </div>
       )}
 
+      <h4>Flow</h4>
+      {graphError && <p className="error">{graphError}</p>}
+      {fullCampaign ? (
+        <FlowCanvas
+          key={campaign._id}
+          campaignId={campaign._id}
+          initialNodes={(fullCampaign.draft && fullCampaign.draft.nodes) || []}
+          initialEdges={(fullCampaign.draft && fullCampaign.draft.edges) || []}
+          liveVersion={fullCampaign.liveVersion === undefined ? null : fullCampaign.liveVersion}
+          publishedNodes={livePublished.nodes}
+          publishedEdges={livePublished.edges}
+          sources={sources}
+          onSaved={(updated) => {
+            setFullCampaign(updated);
+            onChanged();
+          }}
+          onPublished={(published) => {
+            setFullCampaign((prev) =>
+              prev && {
+                ...prev,
+                liveVersion: published.liveVersion,
+                versions: [
+                  ...(prev.versions || []),
+                  { version: published.version, nodes: published.nodes, edges: published.edges, publishedAt: published.publishedAt },
+                ],
+              }
+            );
+            onChanged();
+          }}
+        />
+      ) : (
+        !graphError && <p className="muted">Loading flow…</p>
+      )}
+
       <h4>Build a segment</h4>
       {conditions.map((c, i) => (
         <FilterCondition
           key={i}
-          source={campaign.targetModel}
+          source={sourceId}
           condition={c}
           onChange={(next) => setConditions(conditions.map((cc, idx) => (idx === i ? next : cc)))}
           onRemove={() => setConditions(conditions.filter((_, idx) => idx !== i))}
@@ -421,7 +546,7 @@ function CampaignDetail({ campaign, sourceLabels, onClose, onChanged }) {
       )}
       {enrollResult && (
         <p className="notice">
-          Enrolled {enrollResult.enrolled} contacts. They'll be sent step 1 on the next send cycle.
+          Enrolled {enrollResult.enrolled} contacts. They'll start the flow on the next send cycle.
         </p>
       )}
 
@@ -466,21 +591,50 @@ export default function CampaignsTab({ focusCampaignId = null }) {
   // Opens straight on one campaign when the tab was entered from a leads
   // tab's "Move to campaign", rather than on the campaign list.
   const [selectedId, setSelectedId] = useState(focusCampaignId);
-  const [dataSources, setDataSources] = useState([]);
+  const [sources, setSources] = useState([]);
   const [deletingId, setDeletingId] = useState(null);
+  const [duplicatingId, setDuplicatingId] = useState(null);
   // Per-campaign activation rollup, read from the lead magnet's own database.
   // Its own request rather than part of /api/campaigns: it crosses to a
   // separate database, so a slow or unreachable lead magnet shouldn't hold up
   // the campaign list itself.
   const [activity, setActivity] = useState(null);
 
+  // Returns the campaign list request so a caller that needs the refreshed list
+  // before doing something else (duplicating, which then opens the clone) can
+  // wait for it.
   function reload() {
-    fetchCampaigns()
-      .then(setCampaigns)
-      .catch((err) => setError(err.message));
+    const campaignsLoaded = fetchCampaigns()
+      .then((rows) => {
+        setCampaigns(rows);
+        return rows;
+      })
+      .catch((err) => {
+        setError(err.message);
+        return null;
+      });
     fetchActivitySummary()
       .then(setActivity)
       .catch(() => setActivity(null));
+    return campaignsLoaded;
+  }
+
+  // Clone a proven flow for a new lead magnet. The clone starts unpublished,
+  // with no enrollments and auto-enroll off however the source was set up (see
+  // POST /api/campaigns/:id/duplicate) — so opening it straight away, to swap
+  // its source node before anything is published, is safe.
+  async function handleDuplicate(campaign) {
+    setError(null);
+    setDuplicatingId(campaign._id);
+    try {
+      const clone = await duplicateCampaign(campaign._id);
+      await reload();
+      setSelectedId(clone._id);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setDuplicatingId(null);
+    }
   }
 
   async function handleDelete(campaign) {
@@ -512,24 +666,21 @@ export default function CampaignsTab({ focusCampaignId = null }) {
     }
   }
 
-  useEffect(reload, []);
   useEffect(() => {
-    fetchDataSources()
-      .then(setDataSources)
-      .catch(() => setDataSources([]));
+    reload();
   }, []);
 
-  // Every connected, active Data Source is a valid campaign target alongside
-  // the two built-in sources — labeled with whatever the admin named it on
-  // the Data Sources tab, so it's identifiable here instead of a generic
-  // bucket name.
-  const sources = useMemo(
-    () => [
-      ...STATIC_SOURCES.map((s) => ({ value: s, label: STATIC_SOURCE_LABELS[s] })),
-      ...dataSources.filter((ds) => ds.active).map((ds) => ({ value: `${DYNAMIC_PREFIX}${ds._id}`, label: ds.label })),
-    ],
-    [dataSources]
-  );
+  // The selectable sources come from the backend, which is the only thing that
+  // knows what it can actually read: the built-in sources plus every connected,
+  // active Data Source, each labeled with whatever the admin named it on the
+  // Data Sources tab. Nothing here enumerates sources itself — a source the
+  // backend stops reporting stops being offered, and a newly connected one
+  // appears without a code change.
+  useEffect(() => {
+    fetchCampaignSources()
+      .then((d) => setSources(d.sources || []))
+      .catch(() => setSources([]));
+  }, []);
   const sourceLabels = useMemo(() => Object.fromEntries(sources.map((s) => [s.value, s.label])), [sources]);
 
   const selected = campaigns.find((c) => c._id === selectedId);
@@ -561,7 +712,7 @@ export default function CampaignsTab({ focusCampaignId = null }) {
                 <tr>
                   <th>Name</th>
                   <th>Source</th>
-                  <th>Steps</th>
+                  <th>Nodes</th>
                   <th>Status</th>
                   <th>Active</th>
                   <th>Completed</th>
@@ -584,8 +735,14 @@ export default function CampaignsTab({ focusCampaignId = null }) {
                 {campaigns.map((c) => (
                   <tr key={c._id} className="clickable-row" onClick={() => setSelectedId(c._id)}>
                     <td>{c.name}</td>
-                    <td>{sourceLabels[c.targetModel] || c.targetModel}</td>
-                    <td>{c.steps.length}</td>
+                    {/* Read off the graph's source node(s) by the backend —
+                        a campaign has no single targetModel field any more. */}
+                    <td>{campaignSourceLabel(c, sourceLabels)}</td>
+                    {/* The draft graph's size, as counted by the backend
+                        (GET /api/campaigns). There is no steps[] to measure
+                        any more, and counting nodes here would mean shipping
+                        every campaign's whole graph to render one cell. */}
+                    <td>{c.nodeCount ?? 0}</td>
                     <td>
                       {c.active ? (
                         <span className="badge badge-success">Active</span>
@@ -625,7 +782,19 @@ export default function CampaignsTab({ focusCampaignId = null }) {
                     {activity?.configured && <td>{activity.campaigns[c._id]?.count || 0}</td>}
                     <td>
                       {/* The row opens the campaign, so the click must stop
-                          here or deleting would also navigate into it. */}
+                          here or these would also navigate into it. */}
+                      <button
+                        type="button"
+                        className="link-btn"
+                        disabled={duplicatingId === c._id}
+                        title="Copy this flow into a new, unpublished campaign with no enrollments"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDuplicate(c);
+                        }}
+                      >
+                        {duplicatingId === c._id ? "Duplicating…" : "Duplicate"}
+                      </button>{" "}
                       <button
                         type="button"
                         className="link-btn danger"
@@ -651,8 +820,11 @@ export default function CampaignsTab({ focusCampaignId = null }) {
         <CampaignDetail
           campaign={selected}
           sourceLabels={sourceLabels}
+          sources={sources}
           onClose={() => setSelectedId(null)}
           onChanged={reload}
+          onDuplicate={handleDuplicate}
+          duplicating={duplicatingId === selected._id}
         />
       )}
     </div>

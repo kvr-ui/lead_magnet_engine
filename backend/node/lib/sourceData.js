@@ -1,35 +1,21 @@
-const Contact = require("../models/Contact");
-const Lead = require("../models/Lead");
-const { getAdMagnetConnection } = require("../db");
-const { getSourceFields, DYNAMIC_PREFIX } = require("./sourceFields");
+const { getSourceFields } = require("./sourceFields");
+const { resolveSource } = require("./sourceResolver");
 
-// Resolves a source name to either a Mongoose model or a native driver
-// collection, so callers (campaign filter/member endpoints, the generic
-// data-source documents endpoint) can dispatch on `kind` instead of each
-// re-deriving their own Contact/Lead/AdMagnetStudent/datasource:<id> branch.
-// Model and collection share the same method names used here
-// (.find/.aggregate/.countDocuments), so callers can treat both uniformly.
+// The raw handle onto a source — either a Mongoose model or a native driver
+// collection — for callers (campaign filter/member endpoints, the generic
+// data-source documents endpoint) that run their own aggregation and
+// pagination against it and dispatch on `kind` rather than reading through
+// the resolver's canonical find/mapDoc. Model and collection share the method
+// names used there (.find/.aggregate/.countDocuments), so callers can treat
+// both uniformly.
+//
+// A thin wrapper rather than its own switch: lib/sourceResolver.js owns the
+// one Contact/Lead/datasource:<id> branch in the codebase.
 async function getSourceHandle(source) {
-  if (source === "Contact") return { kind: "model", model: Contact };
-  if (source === "Lead") return { kind: "model", model: Lead };
-  if (source === "AdMagnetStudent") {
-    const conn = getAdMagnetConnection();
-    if (!conn) throw new Error("AD_MAGNET_MONGODB_URI not configured");
-    return { kind: "collection", collection: conn.db.collection("users") };
-  }
-  if (source && source.startsWith(DYNAMIC_PREFIX)) {
-    const id = source.slice(DYNAMIC_PREFIX.length);
-    const DataSourceConnection = require("../models/DataSourceConnection");
-    const { getConnectionFor } = require("./dataSourcePool");
-    const { wrapWithEnrichment } = require("./enrichedCollection");
-    const doc = await DataSourceConnection.findById(id);
-    if (!doc || !doc.active) throw new Error("Unknown or inactive data source");
-    const conn = await getConnectionFor(doc);
-    const raw = conn.db.collection(doc.collectionName);
-    const collection = doc.enrich ? wrapWithEnrichment(raw, doc.enrich) : raw;
-    return { kind: "collection", collection };
-  }
-  throw new Error(`Unknown source "${source}"`);
+  const resolved = await resolveSource(source);
+  return resolved.kind === "model"
+    ? { kind: "model", model: resolved.model }
+    : { kind: "collection", collection: resolved.collection };
 }
 
 function isScalar(v) {
@@ -75,4 +61,7 @@ async function validateFilter(source, filter) {
   return filter || {};
 }
 
-module.exports = { getSourceHandle, validateFilter };
+// isSafeValue is exported alongside the validator because the graph walker
+// evaluates the same filter shape in memory (a `filter` node, a "field"
+// condition) and must agree with this file on exactly which shapes exist.
+module.exports = { getSourceHandle, validateFilter, isSafeValue };

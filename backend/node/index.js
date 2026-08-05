@@ -13,8 +13,11 @@
  *   HOST                 bind address for this server           (default 0.0.0.0)
  *   PY_TARGET            where the Python backend is running     (default http://127.0.0.1:8000)
  *   MONGODB_URI          MongoDB connection string               (see db.js)
- *   AD_MAGNET_MONGODB_URI  connection string for the external ad/lead-magnet
- *                          DB, read-only via /api/ad-magnet/* (optional)
+ *   AD_MAGNET_MONGODB_URI  legacy: CA Guru's database. Read once by
+ *                          tools/seed-ca-guru-source.js to create the
+ *                          equivalent DataSourceConnection, and needed by
+ *                          nothing afterwards. Safe to remove entirely once
+ *                          that connection exists. (optional)
  *   LEAD_MAGNETS_CONFIG  path to the lead magnets JSON file       (default ./config/leadMagnets.json)
  *
  * Lead magnets (which fields each one collects) are configured once via the
@@ -33,19 +36,20 @@ require("dotenv").config();
 const path = require("path");
 const express = require("express");
 const { createProxyMiddleware } = require("http-proxy-middleware");
-const { connectDB, connectAdMagnetDB, mongoose } = require("./db");
+const { connectDB, mongoose } = require("./db");
 const { initLeadMagnets } = require("./lib/leadMagnets");
 const leadsRouter = require("./routes/leads");
 const adminRouter = require("./routes/admin");
 const contactsRouter = require("./routes/contacts");
-const adMagnetRouter = require("./routes/adMagnet");
 const campaignsRouter = require("./routes/campaigns");
+const nodePresetsRouter = require("./routes/nodePresets");
 const integrationsRouter = require("./routes/integrations");
 const dataSourcesRouter = require("./routes/dataSources");
 const settingsRouter = require("./routes/settings");
 const watiRouter = require("./routes/wati");
 const messageEventsRouter = require("./routes/messageEvents");
 const activityRouter = require("./routes/activity");
+const optOutsRouter = require("./routes/optOuts");
 const { startScheduler } = require("./lib/campaignEngine");
 const { requireAdminAuth } = require("./lib/adminAuth");
 const whatsappProvider = require("./lib/whatsappProvider");
@@ -76,6 +80,10 @@ app.use("/api", leadsRouter);
 app.use("/api", contactsRouter);
 app.use("/api", watiRouter);
 app.use("/api", requireAdminAuth, campaignsRouter);
+// The reusable node preset library the campaign canvas inserts from. Presets
+// are copied into a campaign's graph, never linked to it — see
+// models/NodePreset.js.
+app.use("/api", requireAdminAuth, nodePresetsRouter);
 // Reads back what watiRouter's webhook writes. Behind admin auth on purpose —
 // the webhook itself can't be, but nothing that exposes the data should be.
 app.use("/api", requireAdminAuth, messageEventsRouter);
@@ -86,7 +94,9 @@ app.use("/api", requireAdminAuth, activityRouter);
 app.use("/api", requireAdminAuth, integrationsRouter);
 app.use("/api", requireAdminAuth, dataSourcesRouter);
 app.use("/api", requireAdminAuth, settingsRouter);
-app.use("/api/ad-magnet", requireAdminAuth, adMagnetRouter);
+// Global, always-on opt-out management (see models/OptOut.js). Admin-only,
+// same as the other data-exposing routes.
+app.use("/api", requireAdminAuth, optOutsRouter);
 app.use("/admin", requireAdminAuth, adminRouter);
 // React leads dashboard (admin-ui/), built via `npm run build` in that folder.
 app.use("/admin/leads", requireAdminAuth, express.static(ADMIN_UI_DIST));
@@ -178,8 +188,21 @@ async function migrateWatiEnvConfigIfNeeded() {
 
 async function start() {
   await connectDB();
-  await connectAdMagnetDB();
   await initLeadMagnets();
+  // Makes sure CA Guru — the one lead magnet that used to be wired in as code
+  // — exists as an ordinary DataSourceConnection, and records the pointer that
+  // lets enrollments created against the retired "AdMagnetStudent" source name
+  // still resolve. Idempotent, so this is a no-op on every boot after the
+  // first. Never fatal: a seed that can't run must not stop the app serving.
+  try {
+    const { ensureCaGuruDataSource } = require("./tools/seed-ca-guru-source");
+    const seeded = await ensureCaGuruDataSource();
+    if (seeded.action !== "unchanged") {
+      console.log(`[seed-ca-guru-source] ${JSON.stringify(seeded)}`);
+    }
+  } catch (err) {
+    console.warn(`[seed-ca-guru-source] skipped: ${err.message}`);
+  }
   await migrateWatiEnvConfigIfNeeded();
   startScheduler();
   app.listen(PORT, HOST, () => {
