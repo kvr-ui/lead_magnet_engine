@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import FilterCondition, { buildMongoFilter } from "./FilterBuilder";
 import { fetchFilterFields, fetchTemplates } from "./api";
+import WindowScheduleFields from "./WindowScheduleFields";
 
 // Reverse of buildMongoFilter (FilterBuilder.jsx): turns a stored Mongo-ish
 // filter object back into the array of { field, values, cmp } rows
@@ -342,16 +343,6 @@ function MessagePanel({ node, onChangeConfig, canonicalKeySuggestions }) {
   );
 }
 
-const WEEKDAYS = [
-  { value: 0, label: "Sun" },
-  { value: 1, label: "Mon" },
-  { value: 2, label: "Tue" },
-  { value: 3, label: "Wed" },
-  { value: 4, label: "Thu" },
-  { value: 5, label: "Fri" },
-  { value: 6, label: "Sat" },
-];
-
 // wait node: amount/unit, a send-window, and weekday skip-days.
 function WaitPanel({ node, onChangeConfig }) {
   const config = node.config || {};
@@ -384,29 +375,7 @@ function WaitPanel({ node, onChangeConfig }) {
         </select>
       </label>
 
-      <h4>Send window</h4>
-      <label className="form-row">
-        From
-        <input type="time" value={win.from || ""} onChange={(e) => setWindow({ from: e.target.value })} />
-      </label>
-      <label className="form-row">
-        To
-        <input type="time" value={win.to || ""} onChange={(e) => setWindow({ to: e.target.value })} />
-      </label>
-      <label className="form-row">
-        Timezone
-        <input placeholder="e.g. Asia/Kolkata" value={win.tz || ""} onChange={(e) => setWindow({ tz: e.target.value })} />
-      </label>
-
-      <h4>Skip days</h4>
-      <div className="value-chip-row">
-        {WEEKDAYS.map((d) => (
-          <label className="checkbox-row" key={d.value}>
-            <input type="checkbox" checked={skipDays.includes(d.value)} onChange={() => toggleSkipDay(d.value)} />
-            {d.label}
-          </label>
-        ))}
-      </div>
+      <WindowScheduleFields window={win} skipDays={skipDays} onChangeWindow={setWindow} onToggleSkipDay={toggleSkipDay} />
     </div>
   );
 }
@@ -427,6 +396,11 @@ function WaitPanel({ node, onChangeConfig }) {
 //                                       open right now
 //   reply      { since }              - did the lead send us anything at all
 //                                       since our last send (or since enrolling)
+//   reply-text { nodeId, values,      - what the lead's reply to nodeId's send
+//                match }                actually said, not just whether they
+//                                       replied at all
+//   button     { nodeId, values,      - which button (quick-reply/list tap
+//                match }                only) the lead tapped answering nodeId
 //
 // Only "field" had a form before. The others were implemented in the walker but
 // unreachable from the canvas, which is what made a follow-up that chases only
@@ -435,6 +409,8 @@ const CONDITION_KINDS = [
   { value: "field", label: "Lead field", hint: "compare a field on the lead record" },
   { value: "engagement", label: "Message engagement", hint: "did a message land, get read, or get a reply" },
   { value: "reply", label: "Lead replied", hint: "any inbound message from the lead" },
+  { value: "reply-text", label: "Reply match", hint: "did their reply to a message contain certain words" },
+  { value: "button", label: "Button tap", hint: "did they tap a specific button on a message" },
   { value: "activity", label: "Product activity", hint: "did they use the lead magnet" },
   { value: "elapsed", label: "Time elapsed", hint: "how long since the drip started" },
   { value: "window", label: "Conversation window", hint: "can we send free text right now" },
@@ -478,6 +454,98 @@ function engagementStatusOf(config) {
   return String(config.status || config.event || "").toLowerCase();
 }
 
+// evaluateReplyText()/evaluateButton() in lib/campaignEngine.js: `values` (or
+// singular `value`) lists the words/phrases/button labels to match, and
+// `match` (or `mode`) picks "contains" (the default, a substring match) or
+// "whole"/"exact"/"equals" (the reply must equal the entry outright).
+function matchValuesOf(config) {
+  const raw = config.values !== undefined ? config.values : config.value;
+  if (raw === undefined || raw === null) return [];
+  return Array.isArray(raw) ? raw : [raw];
+}
+
+function wholeMatchMode(config) {
+  const declared = String(config.match || config.mode || "").toLowerCase();
+  return declared === "whole" || declared === "exact" || declared === "equals";
+}
+
+// The upstream-message-node picker `engagement` already used, factored out so
+// `reply-text` and `button` reuse the exact same control — including how it
+// keeps a deleted node's id visible as an explicit, clearly-labelled option
+// rather than letting the select silently snap to the first message node.
+function MessageNodePicker({ config, messageNodes, onSelect, label = "Message", hint }) {
+  const selectedMessage = engagementNodeIdOf(config);
+  const messageMissing = Boolean(selectedMessage) && !messageNodes.some((m) => m.id === selectedMessage);
+
+  return (
+    <label className="form-row">
+      {label}
+      <select value={selectedMessage} onChange={(e) => onSelect(e.target.value)}>
+        <option value="">— pick a message node —</option>
+        {messageMissing && <option value={selectedMessage}>{selectedMessage} (no longer in this flow)</option>}
+        {messageNodes.map((m) => (
+          <option key={m.id} value={m.id}>
+            {m.label || m.id}
+          </option>
+        ))}
+      </select>
+      {hint && <span className="muted">{hint}</span>}
+    </label>
+  );
+}
+
+// The free-text counterpart of FilterCondition's value chips (FilterBuilder.jsx):
+// that picker toggles chips drawn from a fetched, finite set of field values;
+// this one has no such set to offer — a reply can say anything — so a value is
+// added by typing it rather than by discovering it, but the chip itself is the
+// same `value-chip-row`/`chip` markup, and clicking one removes it exactly as
+// clicking an active filter chip toggles it off.
+function MatchValueChips({ values, onChange, placeholder }) {
+  const [draft, setDraft] = useState("");
+
+  function commit() {
+    const trimmed = draft.trim();
+    if (trimmed && !values.some((v) => String(v).toLowerCase() === trimmed.toLowerCase())) {
+      onChange([...values, trimmed]);
+    }
+    setDraft("");
+  }
+
+  function remove(value) {
+    onChange(values.filter((v) => v !== value));
+  }
+
+  return (
+    <div>
+      <div className="value-chip-row">
+        {!values.length && <span className="muted">Nothing added yet.</span>}
+        {values.map((v) => (
+          <button type="button" key={v} className="chip active" onClick={() => remove(v)} title="Remove">
+            {v} ×
+          </button>
+        ))}
+      </div>
+      <div className="value-chip-row">
+        <input
+          type="text"
+          placeholder={placeholder}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              commit();
+            }
+          }}
+        />
+        <button type="button" className="chip" onClick={commit}>
+          Add
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ConditionPanel({ node, messageNodes, defaultFilterSource, onChangeConfig }) {
   const config = node.config || {};
   const on = String(config.on || "field").toLowerCase();
@@ -497,13 +565,6 @@ function ConditionPanel({ node, messageNodes, defaultFilterSource, onChangeConfi
     if (next === "engagement" && !engagementStatusOf(config)) return set({ on: next, status: "replied" });
     set({ on: next });
   }
-
-  const selectedMessage = engagementNodeIdOf(config);
-  // A reference to a node that no longer exists must stay visible rather than
-  // letting the select silently snap to the first message node - which would
-  // read as a valid configuration nobody chose. Kept as an explicit option, and
-  // warned about by validateGraph.
-  const messageMissing = Boolean(selectedMessage) && !messageNodes.some((m) => m.id === selectedMessage);
 
   return (
     <div>
@@ -537,22 +598,13 @@ function ConditionPanel({ node, messageNodes, defaultFilterSource, onChangeConfi
             everyone else takes “no”.
           </p>
 
-          <label className="form-row">
-            Message
-            <select value={selectedMessage} onChange={(e) => set({ nodeId: e.target.value })}>
-              <option value="">— pick a message node —</option>
-              {messageMissing && <option value={selectedMessage}>{selectedMessage} (no longer in this flow)</option>}
-              {messageNodes.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.label || m.id}
-                </option>
-              ))}
-            </select>
-            <span className="muted">
-              Answered per message, not per phone number: it checks the provider's id for that specific send, so a reply
-              to an earlier message doesn't count as a reply to this one.
-            </span>
-          </label>
+          <MessageNodePicker
+            config={config}
+            messageNodes={messageNodes}
+            onSelect={(id) => set({ nodeId: id })}
+            hint="Answered per message, not per phone number: it checks the provider's id for that specific send, so a reply
+              to an earlier message doesn't count as a reply to this one."
+          />
 
           <label className="form-row">
             Reached status
@@ -594,6 +646,46 @@ function ConditionPanel({ node, messageNodes, defaultFilterSource, onChangeConfi
             Asked per phone number, like the conversation-window condition: a reply to any campaign or to the chatbot
             counts. Use <strong>Message engagement</strong> instead when the question is “did they answer <em>that
             specific message</em>”.
+          </p>
+        </div>
+      )}
+
+      {(on === "reply-text" || on === "button") && (
+        <div>
+          <p className="muted">
+            {on === "reply-text"
+              ? "Asks what the lead typed back to one earlier message. Leads whose reply contains — or, in whole-reply mode, exactly matches — one of the words or phrases below take the “yes” branch; everyone else takes “no”."
+              : "Asks which button the lead tapped on one earlier message's quick replies or list. Leads who tapped a button whose label matches one of the entries below take the “yes” branch; everyone else takes “no”. A typed reply that merely reads like a button label does not count — only an actual tap does."}
+          </p>
+
+          <MessageNodePicker
+            config={config}
+            messageNodes={messageNodes}
+            onSelect={(id) => set({ nodeId: id })}
+            hint="Answered per message, not per phone number: it checks the provider's id for that specific send, so a reply
+              to an earlier message doesn't count as a reply to this one."
+          />
+
+          <label className="form-row">
+            Match
+            <select value={wholeMatchMode(config) ? "whole" : "contains"} onChange={(e) => set({ match: e.target.value })}>
+              <option value="contains">Contains — appears anywhere in the reply</option>
+              <option value="whole">Whole reply — matches it exactly</option>
+            </select>
+          </label>
+
+          <div className="form-row">
+            <span>{on === "reply-text" ? "Words or phrases to match" : "Button labels to match"}</span>
+            <MatchValueChips
+              values={matchValuesOf(config)}
+              onChange={(values) => set({ values })}
+              placeholder={on === "reply-text" ? "e.g. yes, interested, stop" : "e.g. Book a call"}
+            />
+          </div>
+
+          <p className="muted">
+            Put a <strong>wait</strong> node between that message and this one. Reply events arrive afterwards over
+            the webhook, so a condition evaluated straight after a send finds nothing and routes everyone down “no”.
           </p>
         </div>
       )}
