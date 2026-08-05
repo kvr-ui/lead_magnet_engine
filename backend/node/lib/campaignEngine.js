@@ -19,6 +19,10 @@ const { isWindowOpen } = require("./sessionWindow");
 // plus the backoff schedule that goes with a retryable one — see the header
 // of lib/errorClassification.js.
 const { classify: classifySendError, maxSendAttempts, backoffForAttempt } = require("./errorClassification");
+// Account-level frequency cap / quiet hours policy — off by default. See its
+// header for why the count comes from enrollment history and not
+// MessageEvent, and why the manual-send toggle exists.
+const { getSendPolicy, recentSendCount } = require("./sendPolicy");
 
 // How many due enrollments to send per poll tick, and the gap between sends —
 // keeps us well under the connected provider's rate limits instead of firing
@@ -387,6 +391,53 @@ function resolveWaitAt(node, from) {
   });
 }
 
+// --- account-level send policy (frequency cap + quiet hours) ---------------
+//
+// lib/sendPolicy.js owns the policy's storage/shape and the cross-campaign
+// send-count query; this is the one place the two get turned into a single
+// "does this send have to wait, and until when" answer for the message node
+// below. Quiet hours are enforced with clampToWindow itself, not a
+// reimplementation of it — the same push-forward-until-inside-the-window-
+// and-off-a-skipped-day arithmetic (DST included) that a wait node applies to
+// its own config, so this file has exactly one timezone implementation.
+//
+// Returns null when the send may go ahead right now.
+async function sendPolicyThrottle(policy, enrollment, ctx) {
+  const quietUntil = clampToWindow(ctx.now, {
+    window: policy.quietHours.window,
+    tz: policy.quietHours.tz,
+    skipDays: policy.quietHours.skipDays,
+  });
+  if (quietUntil.getTime() !== ctx.now.getTime()) {
+    return {
+      nextSendAt: quietUntil,
+      reason: `account-level quiet hours: "${enrollment.phone}" is next eligible at ${quietUntil.toISOString()}`,
+    };
+  }
+
+  const cap = policy.maxPerContact;
+  if (cap.count > 0) {
+    const windowMs = cap.windowMinutes * 60 * 1000;
+    const since = new Date(ctx.now.getTime() - windowMs);
+    // Injected the same way isWindowOpen/activitySinceLastSend are, so the
+    // verify harness can drive the cap without touching real history rows.
+    const { count, oldestAt } = await ctx.deps.recentSendCount(enrollment.phone, since, {
+      includeManual: policy.countManualSends,
+    });
+    if (count >= cap.count) {
+      // The cap next admits a send the instant the oldest one it counted
+      // ages out of the window — a leaky bucket, not a hard reset.
+      const nextSendAt = oldestAt ? new Date(oldestAt.getTime() + windowMs) : new Date(ctx.now.getTime() + windowMs);
+      return {
+        nextSendAt,
+        reason: `account-level frequency cap: "${enrollment.phone}" has received ${count}/${cap.count} message(s) in the last ${cap.windowMinutes} minute(s)`,
+      };
+    }
+  }
+
+  return null;
+}
+
 // --- filter / condition evaluation -----------------------------------------
 
 const COMPARATORS = {
@@ -573,7 +624,116 @@ async function evaluateReply(node, ctx) {
   return (await ctx.deps.MessageEvent.countDocuments(query)) > 0;
 }
 
-// A `condition` node's `config.on` picks one of six evaluation kinds. Each
+// --- reply-text / button -----------------------------------------------------
+//
+// Both ask what the contact SAID or TAPPED in answer to one specific upstream
+// `message` node, as opposed to `reply` above (on: "reply"), which only asks
+// the phone-wide boolean "did they say anything at all since our last send".
+// Named "reply-text" rather than "reply" because that boolean kind already
+// owns the name from the reply-flows work; giving the text-matching kind a
+// distinct name keeps both dispatchable without one shadowing the other.
+//
+// Config shape mirrors `engagement`'s: { nodeId, ... }. nodeId (or the
+// messageNodeId/node aliases evaluateEngagement already accepts) names the
+// message node whose send this is scoped to. `values` (or singular `value`)
+// lists the words/phrases to match; `match` picks "contains" (the default) or
+// "whole"/"exact" comparison. Matching is always case- and
+// whitespace-normalised, via the same normalizeBranch() the edge-picker
+// already trims/lowercases branch names with.
+
+function messageNodeIdFor(config) {
+  return config.nodeId || config.messageNodeId || config.node;
+}
+
+function configuredMatchValues(config) {
+  const raw = config.values !== undefined ? config.values : config.value;
+  if (raw === undefined || raw === null) return [];
+  const list = Array.isArray(raw) ? raw : [raw];
+  return list.map((entry) => normalizeBranch(entry)).filter(Boolean);
+}
+
+function wholeMatchMode(config) {
+  const declared = normalizeBranch(config.match || config.mode);
+  return declared === "whole" || declared === "exact" || declared === "equals";
+}
+
+function textMatches(candidate, values, whole) {
+  const normalized = normalizeBranch(candidate);
+  if (!normalized) return false;
+  return values.some((value) => (whole ? normalized === value : normalized.includes(value)));
+}
+
+/**
+ * The inbound events answering the exact send this node names — the upstream
+ * message node's most recent "sent" history entry.
+ *
+ * Keyed on the reply-context id the webhook persists on the inbound event
+ * (task 3's inReplyToProviderMessageId) against the id captured on that
+ * send's own history entry, so "did they reply to THIS node" is exact rather
+ * than approximated by timing — the same pairing routes/wati.js itself makes
+ * when it links an inbound event back to an enrollment. Falls back to the
+ * same time-window scoping evaluateEngagement above already uses when no
+ * provider id was ever captured for that send (the provider doesn't always
+ * echo one — see extractSentMessageId above).
+ *
+ * Returns an empty array — never throws — when the named node simply hasn't
+ * sent yet; a condition asking about a send that hasn't happened is "no
+ * reply yet", not a misconfiguration.
+ */
+async function inboundEventsForNode(node, ctx) {
+  const config = node.config || {};
+  const messageNodeId = messageNodeIdFor(config);
+  if (!messageNodeId) throw new Error("names no upstream message node to check");
+
+  const sends = (ctx.enrollment.history || []).filter(
+    (entry) => entry && entry.nodeId === messageNodeId && entry.status === "sent"
+  );
+  if (!sends.length) return [];
+  const last = sends[sends.length - 1];
+
+  const ids = [last.providerMessageId, last.providerLocalMessageId].filter(Boolean);
+  const query = ids.length
+    ? { status: "received", inReplyToProviderMessageId: { $in: ids } }
+    : { status: "received", enrollment: ctx.enrollment._id, receivedAt: { $gte: last.sentAt } };
+  return ctx.deps.MessageEvent.find(query);
+}
+
+// Did the contact's reply to the named upstream message match one of the
+// configured words/phrases?
+async function evaluateReplyText(node, ctx) {
+  const config = node.config || {};
+  if (!messageNodeIdFor(config)) throw new Error("names no upstream message node to check");
+  const values = configuredMatchValues(config);
+  if (!values.length) throw new Error("has no reply text or phrase to match against");
+  const whole = wholeMatchMode(config);
+  const events = await inboundEventsForNode(node, ctx);
+  return events.some((event) => textMatches(event.text, values, whole));
+}
+
+// Quick-reply and list button taps only (task 3's interactiveType) — a typed
+// reply that merely reads like a button label must not match here, the same
+// distinction routes/wati.js's marketing opt-out button check already draws
+// (see matchMarketingOptOutButton there). Label text is the primary and
+// reliable match key; interactivePayloadId is checked too when the payload
+// happened to carry one, but per its own doc comment on MessageEvent nothing
+// may depend on it — the one real captured button fixture in this repo has no
+// such field, only a label under `text`.
+const BUTTON_INTERACTIVE_TYPES = new Set(["button", "list"]);
+
+async function evaluateButton(node, ctx) {
+  const config = node.config || {};
+  if (!messageNodeIdFor(config)) throw new Error("names no upstream message node to check");
+  const values = configuredMatchValues(config);
+  if (!values.length) throw new Error("has no button label to match against");
+  const whole = wholeMatchMode(config);
+  const events = await inboundEventsForNode(node, ctx);
+  return events.some((event) => {
+    if (!BUTTON_INTERACTIVE_TYPES.has(String(event.interactiveType || "").toLowerCase())) return false;
+    return textMatches(event.text, values, whole) || textMatches(event.interactivePayloadId, values, whole);
+  });
+}
+
+// A `condition` node's `config.on` picks one of eight evaluation kinds. Each
 // returns a plain boolean, which the walker turns into the "yes"/"no" edge.
 async function evaluateCondition(node, ctx) {
   const config = node.config || {};
@@ -588,6 +748,8 @@ async function evaluateCondition(node, ctx) {
   if (on === "elapsed") return evaluateElapsed(node, ctx);
   if (on === "window") return evaluateWindow(node, ctx);
   if (on === "reply") return evaluateReply(node, ctx);
+  if (on === "reply-text") return evaluateReplyText(node, ctx);
+  if (on === "button") return evaluateButton(node, ctx);
   throw new Error(`has an unknown condition kind "${config.on}"`);
 }
 
@@ -861,12 +1023,13 @@ function renderText(node, doc) {
 
 function emptyResult() {
   return {
-    // How the tick ended: "sent", "acted", "waiting", "retrying", "completed",
-    // "paused", "failed", or "gated" (the kill switch or the allowlist refused
-    // the send or the action, so nothing at all is applied to the enrollment).
-    // "retrying" joins "gated"/"waiting" as a stop that leaves status alone —
-    // see the message node's catch block for how a retryable send failure
-    // under budget reaches it.
+    // How the tick ended: "sent", "acted", "waiting", "retrying", "throttled",
+    // "completed", "paused", "failed", or "gated" (the kill switch or the
+    // allowlist refused the send or the action, so nothing at all is applied
+    // to the enrollment). "retrying" and "throttled" join "gated"/"waiting" as
+    // stops that leave status alone — see the message node's catch block for
+    // how a retryable send failure under budget reaches "retrying", and the
+    // account-level send policy check just above it for "throttled".
     stop: null,
     reason: null,
     reasonCode: null,
@@ -922,6 +1085,8 @@ function defaultDeps() {
     isSendingEnabled,
     isWindowOpen,
     activitySinceLastSend: (...args) => require("./leadActivity").activitySinceLastSend(...args),
+    getSendPolicy,
+    recentSendCount,
   };
 }
 
@@ -1229,6 +1394,34 @@ async function runWalk(enrollment, campaign, ctx) {
         return park(result, "failed", `target document ${enrollment.targetId} no longer exists`);
       }
 
+      // Account-level frequency cap / quiet hours (issue #35) — checked here,
+      // after the target read and before rendering or calling the provider,
+      // and only when the policy is turned on AND sending is genuinely live.
+      // That second condition matters as much as the first: with the kill
+      // switch off, no history is being written at all (ctx.send below turns
+      // that into the ordinary "gated" no-op), and running the quiet-hours
+      // clock anyway would defer a lead for a reason that isn't why nothing
+      // is actually going out. Deliberately not folded into defaultDeps'
+      // isSendingEnabled-then-throttle as a single call: reading the policy
+      // first means an account that has never touched this feature pays for
+      // one cheap AppSetting lookup and nothing more.
+      const sendPolicy = await ctx.deps.getSendPolicy();
+      if (sendPolicy.enabled && (await ctx.deps.isSendingEnabled())) {
+        const throttle = await sendPolicyThrottle(sendPolicy, enrollment, ctx);
+        if (throttle) {
+          // Same family as "gated"/"waiting"/"retrying": status and history
+          // are left untouched, only currentNodeId and nextSendAt move.
+          // currentNodeId is set explicitly, not left as whatever it already
+          // was, because decision nodes may have chained ahead of this one
+          // earlier in this same tick.
+          result.currentNodeId = node.id;
+          result.stop = "throttled";
+          result.nextSendAt = throttle.nextSendAt;
+          result.reason = throttle.reason;
+          return result;
+        }
+      }
+
       const params = messageType === "text" ? [] : renderParams(node, doc);
       const text = messageType === "text" ? renderText(node, doc) : "";
       const attempt = {
@@ -1482,8 +1675,11 @@ async function noopSender() {
  *            dry-run calls walk a flow forward across ticks.
  *   hopLimit number - node visits allowed in this tick (default 50).
  *   deps     { resolveSource, MessageEvent, isSendingEnabled,
- *            activitySinceLastSend } - the seam the verify harness substitutes
- *            to walk a graph without touching the real sources.
+ *            activitySinceLastSend, getSendPolicy, recentSendCount } - the
+ *            seam the verify harness substitutes to walk a graph without
+ *            touching the real sources. getSendPolicy/recentSendCount back
+ *            the account-level frequency cap / quiet hours check (issue #35);
+ *            see lib/sendPolicy.js.
  *
  * Returns the walk result: { stop, reason, visited[], path[], sends[],
  * history[], currentNodeId, nextSendAt, status, exitOutcome, hops }. `sends`
@@ -1743,6 +1939,10 @@ module.exports = {
   sendSingleMessage,
   walkEnrollment,
   resolveWaitAt,
+  // Exported so lib/sendPolicy.js's quiet-hours check and the verify harness
+  // reuse this exact window/skip-day/DST clamp rather than a second
+  // implementation of it — see the "wait scheduling" section above.
+  clampToWindow,
   // Exported for the verify harness, which drives the genuine HTTP/write paths
   // (timeout, non-2xx, success) against a server it starts itself.
   performAction,

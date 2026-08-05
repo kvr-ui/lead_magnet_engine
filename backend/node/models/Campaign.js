@@ -95,8 +95,9 @@ const NODE_KINDS = ["source", "filter", "message", "wait", "condition", "split",
  *
  * `condition` - { on, ...per-kind args }
  *   on is one of "field", "engagement", "activity", "elapsed", "window",
- *   "reply"; the remaining keys depend on which (a "field" condition needs a
- *   field/operator/value, an "elapsed" condition needs a duration, and so on).
+ *   "reply", "reply-text", "button"; the remaining keys depend on which (a
+ *   "field" condition needs a field/operator/value, an "elapsed" condition
+ *   needs a duration, and so on).
  *   "window" takes no args at all - it asks whether the lead's phone has an
  *   open 24h conversation window, which has exactly one answer and no knobs.
  *   "reply" - { since: "lastSend" | "start" } - asks whether the lead's phone
@@ -104,6 +105,16 @@ const NODE_KINDS = ["source", "filter", "message", "wait", "condition", "split",
  *   phone-based, unlike "engagement" with status "replied", which asks about
  *   one specific message node's send and depends on provider message ids
  *   being backfilled.
+ *   "reply-text" - { nodeId, values: [...], match: "contains" | "whole" } -
+ *   and "button" - { nodeId, values: [...], match } - ask what the lead's
+ *   reply to nodeId's send actually said or tapped, not just whether they
+ *   replied at all. Matched via the reply-context id the webhook persists
+ *   (inReplyToProviderMessageId) against the provider id on nodeId's own send,
+ *   falling back to engagement's time-window scoping when no provider id was
+ *   captured. "button" additionally requires the event's interactiveType to be
+ *   a button/list tap, not merely text that reads like one. values is checked
+ *   case- and whitespace-normalised, as a substring ("contains", the default)
+ *   or the whole value ("whole"/"exact").
  *   Left as Mixed on purpose
  *   - enumerating every per-kind arg set as its own sub-schema would freeze
  *   shapes the walker still owns.
