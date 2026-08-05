@@ -15,6 +15,7 @@ import "@xyflow/react/dist/base.css";
 import NodeConfigPanel from "./NodeConfigPanel";
 import { describeFilter } from "./FilterBuilder";
 import { updateCampaign, publishCampaign, fetchNodePresets, createNodePreset, updateNodePreset, deleteNodePreset } from "./api";
+import { validateGraph } from "./graphValidation";
 
 // Every node kind the schema defines. split/goal/action joined the palette once
 // their walker handlers landed and their config panels were built.
@@ -82,10 +83,6 @@ function subtitleFor(kind, config) {
   return null;
 }
 
-function isSourceInvalid(kind, config) {
-  return kind === "source" && !((config || {}).map && (config || {}).map.phone);
-}
-
 // An action node that hasn't been switched on. Surfaced on the canvas itself,
 // not only inside the inspector: an action is the one node kind with a real
 // external side effect, so which of them are live has to be answerable at a
@@ -106,7 +103,6 @@ function toRFNode(n) {
       label: n.label || "",
       config: n.config || {},
       subtitle: subtitleFor(n.kind, n.config),
-      invalid: isSourceInvalid(n.kind, n.config),
       actionDisabled: isActionDisabled(n.kind, n.config),
     },
   };
@@ -156,7 +152,7 @@ function FlowNode({ data }) {
   const branches = TWO_HANDLE_KINDS[data.kind];
   return (
     <div
-      className={`flow-node flow-node-${data.kind}${data.invalid ? " flow-node-invalid" : ""}${
+      className={`flow-node flow-node-${data.kind}${data.hasError ? " flow-node-invalid" : ""}${
         data.actionDisabled ? " flow-node-action-off" : ""
       }`}
     >
@@ -171,7 +167,7 @@ function FlowNode({ data }) {
       </div>
       <div className="flow-node-label">{data.label || `(unnamed ${data.kind})`}</div>
       {data.subtitle && <div className="flow-node-subtitle">{data.subtitle}</div>}
-      {data.invalid && <div className="flow-node-error">phone mapping required</div>}
+      {data.hasError && data.errorMessage && <div className="flow-node-error">{data.errorMessage}</div>}
       {branches ? (
         <div className="flow-node-branches">
           {branches.map((b) => (
@@ -316,6 +312,63 @@ function PresetLibrary({ presets, loading, error, onRename, onDelete }) {
   );
 }
 
+// --- validation panel -------------------------------------------------------
+// Two grouped, counted lists built straight from graphValidation's output —
+// errors first, hidden entirely when the graph is clean. A row that names a
+// node is a button: clicking it selects that node on the canvas exactly as
+// clicking the node itself would. A row with no nodeId (e.g. "this flow has
+// no source node") describes a problem that isn't anchored to one node, so it
+// renders as plain text instead of a button.
+
+function ValidationRow({ problem, onSelectNode }) {
+  if (problem.nodeId) {
+    return (
+      <li>
+        <button type="button" className="flow-validation-row" onClick={() => onSelectNode(problem.nodeId)}>
+          {problem.message}
+        </button>
+      </li>
+    );
+  }
+  return (
+    <li>
+      <span className="flow-validation-row flow-validation-row-static">{problem.message}</span>
+    </li>
+  );
+}
+
+function ValidationPanel({ errors, warnings, onSelectNode }) {
+  if (!errors.length && !warnings.length) return null;
+  return (
+    <div className="flow-validation-panel">
+      {errors.length > 0 && (
+        <div className="flow-validation-group flow-validation-group-errors">
+          <h5 className="flow-validation-group-head">
+            {errors.length} error{errors.length === 1 ? "" : "s"} — must be fixed before this flow can go live
+          </h5>
+          <ul className="flow-validation-list">
+            {errors.map((e, i) => (
+              <ValidationRow key={`${e.nodeId || "graph"}-${i}`} problem={e} onSelectNode={onSelectNode} />
+            ))}
+          </ul>
+        </div>
+      )}
+      {warnings.length > 0 && (
+        <div className="flow-validation-group flow-validation-group-warnings">
+          <h5 className="flow-validation-group-head">
+            {warnings.length} warning{warnings.length === 1 ? "" : "s"} — leads that reach these will stall
+          </h5>
+          <ul className="flow-validation-list">
+            {warnings.map((w, i) => (
+              <ValidationRow key={`${w.nodeId || "graph"}-${i}`} problem={w} onSelectNode={onSelectNode} />
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // --- the canvas itself ---------------------------------------------------
 
 function FlowCanvasInner({
@@ -328,6 +381,7 @@ function FlowCanvasInner({
   sources,
   onGraphChange,
   onValidityChange,
+  onDirtyChange,
   onSaved,
   onPublished,
 }) {
@@ -351,8 +405,56 @@ function FlowCanvasInner({
   const presetsRef = useRef(presets);
   presetsRef.current = presets;
 
-  const invalidCount = useMemo(() => nodes.filter((n) => n.data.invalid).length, [nodes]);
-  const canSave = invalidCount === 0;
+  // Full two-tier validation (graphValidation.js), recomputed from the graph
+  // itself rather than stored on nodes — every rule here (including what used
+  // to be the canvas's one hardcoded "source needs a phone mapping" check) now
+  // comes from that module, so this is the only place gating logic reads from.
+  const domainGraph = useMemo(() => toDomainGraph(nodes, edges), [nodes, edges]);
+  const validation = useMemo(() => validateGraph(domainGraph), [domainGraph]);
+  const blockingErrors = useMemo(() => validation.errors.filter((e) => e.blocksSave), [validation.errors]);
+  // Saving mirrors the two Mongoose validators the backend runs on every
+  // save (duplicate ids, dangling edges) — every other error still leaves a
+  // half-built flow saveable. Publishing has no such carve-out: any error
+  // blocks it.
+  const canSave = blockingErrors.length === 0;
+  const canPublish = validation.errors.length === 0;
+
+  const errorNodeIds = useMemo(() => new Set(validation.errors.filter((e) => e.nodeId).map((e) => e.nodeId)), [validation.errors]);
+  const errorMessageByNodeId = useMemo(() => {
+    const map = new Map();
+    for (const e of validation.errors) {
+      if (e.nodeId && !map.has(e.nodeId)) map.set(e.nodeId, e.message);
+    }
+    return map;
+  }, [validation.errors]);
+  // Layered on top of `nodes` purely for rendering: which nodes currently
+  // carry a validation error is derived from the whole graph, not stored on
+  // the node itself, so it's computed here instead of written back into node
+  // state (which is what the old per-node isSourceInvalid() check did).
+  const renderNodes = useMemo(
+    () =>
+      nodes.map((n) => {
+        const hasError = errorNodeIds.has(n.id);
+        const errorMessage = errorMessageByNodeId.get(n.id);
+        if (n.data.hasError === hasError && n.data.errorMessage === errorMessage) return n;
+        return { ...n, data: { ...n.data, hasError, errorMessage } };
+      }),
+    [nodes, errorNodeIds, errorMessageByNodeId]
+  );
+
+  const saveBlockedReason = useMemo(() => {
+    if (blockingErrors.length === 0) return null;
+    return `Save draft is blocked — ${blockingErrors.length} node id or connection problem${
+      blockingErrors.length === 1 ? "" : "s"
+    } must be fixed first (see below).`;
+  }, [blockingErrors]);
+
+  const publishBlockedReason = useMemo(() => {
+    if (validation.errors.length === 0) return null;
+    return `Publish is blocked — ${validation.errors.length} error${
+      validation.errors.length === 1 ? "" : "s"
+    } must be fixed first (see below).`;
+  }, [validation.errors]);
 
   useEffect(() => {
     onValidityChange?.(canSave);
@@ -360,11 +462,15 @@ function FlowCanvasInner({
 
   useEffect(() => {
     if (campaignId) return; // create-mode only: detail mode persists via Save/Publish below
-    onGraphChange?.(toDomainGraph(nodes, edges));
+    onGraphChange?.(domainGraph);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes, edges, campaignId]);
+  }, [domainGraph, campaignId]);
 
-  const dirty = useMemo(() => !graphsEqual(toDomainGraph(nodes, edges), localPublished), [nodes, edges, localPublished]);
+  const dirty = useMemo(() => !graphsEqual(domainGraph, localPublished), [domainGraph, localPublished]);
+
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
 
   const onConnect = useCallback(
     (params) => {
@@ -439,6 +545,19 @@ function FlowCanvasInner({
   const onNodeClick = useCallback((_event, node) => setSelectedId(node.id), []);
   const onPaneClick = useCallback(() => setSelectedId(null), []);
 
+  // Selecting a node from the validation panel mirrors clicking it directly
+  // on the canvas: `selectedId` opens its config panel, and `selected` is set
+  // in node state so the canvas highlights it too — the same flag React Flow
+  // itself sets (via onNodesChange) when a node or the empty pane is clicked.
+  const selectNode = useCallback(
+    (nodeId) => {
+      if (!nodeId) return;
+      setNodes((nds) => nds.map((n) => (n.selected === (n.id === nodeId) ? n : { ...n, selected: n.id === nodeId })));
+      setSelectedId(nodeId);
+    },
+    [setNodes]
+  );
+
   const onNodesDelete = useCallback(
     (deleted) => {
       const ids = new Set(deleted.map((n) => n.id));
@@ -468,7 +587,6 @@ function FlowCanvasInner({
               label,
               config,
               subtitle: subtitleFor(n.data.kind, config),
-              invalid: isSourceInvalid(n.data.kind, config),
               actionDisabled: isActionDisabled(n.data.kind, config),
             },
           };
@@ -554,7 +672,7 @@ function FlowCanvasInner({
 
   async function handleSave() {
     if (!canSave) {
-      setError("Every source node needs a phone mapping before this flow can be saved.");
+      setError(saveBlockedReason || "This flow can't be saved yet.");
       return;
     }
     setError(null);
@@ -571,8 +689,8 @@ function FlowCanvasInner({
   }
 
   async function handlePublish() {
-    if (!canSave) {
-      setError("Every source node needs a phone mapping before this flow can be published.");
+    if (!canPublish) {
+      setError(publishBlockedReason || "This flow can't be published yet.");
       return;
     }
     setError(null);
@@ -606,10 +724,21 @@ function FlowCanvasInner({
           {error && <span className="error">{error}</span>}
           {campaignId ? (
             <>
-              <button type="button" className="secondary-btn" onClick={handleSave} disabled={saving || publishing}>
+              <button
+                type="button"
+                className="secondary-btn"
+                onClick={handleSave}
+                disabled={saving || publishing || !canSave}
+                title={saveBlockedReason || undefined}
+              >
                 {saving ? "Saving…" : "Save draft"}
               </button>
-              <button type="button" onClick={handlePublish} disabled={saving || publishing || !dirty}>
+              <button
+                type="button"
+                onClick={handlePublish}
+                disabled={saving || publishing || !dirty || !canPublish}
+                title={publishBlockedReason || undefined}
+              >
                 {publishing ? "Publishing…" : "Publish"}
               </button>
             </>
@@ -618,12 +747,10 @@ function FlowCanvasInner({
           )}
         </div>
       </div>
-      {!canSave && (
-        <p className="error">
-          {invalidCount} source node{invalidCount === 1 ? "" : "s"} still need{invalidCount === 1 ? "s" : ""} a phone
-          mapping — open it from the canvas and set one before saving.
-        </p>
-      )}
+      {campaignId && saveBlockedReason && <p className="error flow-gate-reason">{saveBlockedReason}</p>}
+      {campaignId && publishBlockedReason && <p className="error flow-gate-reason">{publishBlockedReason}</p>}
+
+      <ValidationPanel errors={validation.errors} warnings={validation.warnings} onSelectNode={selectNode} />
 
       <div className="flow-canvas-grid">
         <div className="flow-palette">
@@ -644,7 +771,7 @@ function FlowCanvasInner({
 
         <div className="flow-surface" ref={wrapperRef} onDrop={onDrop} onDragOver={onDragOver}>
           <ReactFlow
-            nodes={nodes}
+            nodes={renderNodes}
             edges={edges}
             nodeTypes={NODE_TYPES}
             onNodesChange={onNodesChange}
@@ -696,6 +823,7 @@ export default function FlowCanvas({
   sources = [],
   onGraphChange,
   onValidityChange,
+  onDirtyChange,
   onSaved,
   onPublished,
 }) {
@@ -711,6 +839,7 @@ export default function FlowCanvas({
         sources={sources}
         onGraphChange={onGraphChange}
         onValidityChange={onValidityChange}
+        onDirtyChange={onDirtyChange}
         onSaved={onSaved}
         onPublished={onPublished}
       />
