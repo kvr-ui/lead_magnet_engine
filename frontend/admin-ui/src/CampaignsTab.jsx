@@ -233,6 +233,67 @@ const DETAIL_TABS = [
   { id: "results", label: "Results" },
 ];
 
+// --- Stuck-leads rollup (task 24, #24) ------------------------------------
+//
+// The engine's contract is that a broken graph parks the enrollment
+// (paused/failed) with a human-readable `statusReason` rather than throwing.
+// The enrollments table below is paginated, so a rollup built from whatever
+// page happens to be loaded would under-count and mislead — it has to walk
+// every paused and every failed row itself. GET /campaigns/:id/enrollments
+// makes that possible without a backend change: it takes a status filter and
+// its `total` is an exact countDocuments, uncapped by page size. So this
+// pages through status=paused and status=failed at the endpoint's own
+// maximum page size (1000) and tallies statusReason across every row.
+//
+// ROLLUP_MAX_PAGES bounds how far it will page per status, purely so one
+// pathological campaign can't turn a tab load into thousands of requests. In
+// the (expected to be rare) case that bound is hit, `complete` comes back
+// false and the UI says so rather than presenting a partial breakdown as the
+// whole picture — the total count itself stays exact either way, since it
+// comes from the endpoint's `total`, not from how many rows were fetched.
+const ROLLUP_STATUSES = ["paused", "failed"];
+const ROLLUP_PAGE_SIZE = 1000;
+const ROLLUP_MAX_PAGES = 20;
+
+async function fetchStuckLeadRollup(campaignId) {
+  const counts = new Map(); // "status\u0000reason" -> count
+  let total = 0;
+  let complete = true;
+
+  for (const status of ROLLUP_STATUSES) {
+    let page = 1;
+    let seen = 0;
+    let statusTotal = 0;
+    for (;;) {
+      const res = await fetchEnrollments(campaignId, status, page, ROLLUP_PAGE_SIZE);
+      if (page === 1) statusTotal = res.total || 0;
+      const rows = res.enrollments || [];
+      for (const e of rows) {
+        const reason = (e.statusReason || "").trim() || "No reason recorded";
+        const key = `${status}\u0000${reason}`;
+        counts.set(key, (counts.get(key) || 0) + 1);
+      }
+      seen += rows.length;
+      if (seen >= statusTotal || rows.length === 0) break;
+      if (page >= ROLLUP_MAX_PAGES) {
+        complete = false;
+        break;
+      }
+      page += 1;
+    }
+    total += statusTotal;
+  }
+
+  const reasons = [...counts.entries()]
+    .map(([key, count]) => {
+      const [status, reason] = key.split("\u0000");
+      return { status, reason, count };
+    })
+    .sort((a, b) => b.count - a.count);
+
+  return { total, reasons, complete };
+}
+
 function CampaignDetail({
   campaign,
   sourceLabels,
@@ -294,6 +355,12 @@ function CampaignDetail({
   const [enrollments, setEnrollments] = useState({ enrollments: [], total: 0, totalPages: 1 });
   // The lead whose message timeline is open, if any.
   const [timelineFor, setTimelineFor] = useState(null);
+  // Campaign-wide breakdown of why enrollments are stuck, independent of the
+  // status filter/pager above (see fetchStuckLeadRollup) — null until the
+  // first fetch resolves, so "no rollup yet" and "rollup says nothing is
+  // stuck" (total === 0) are never conflated.
+  const [stuckRollup, setStuckRollup] = useState(null);
+  const [stuckRollupError, setStuckRollupError] = useState(null);
 
   const [membersPage, setMembersPage] = useState(1);
   const [members, setMembers] = useState({ members: [], total: 0, totalPages: 1 });
@@ -356,6 +423,20 @@ function CampaignDetail({
       .then(setEnrollments)
       .catch(() => {});
   }, [campaign._id, statusFilter, page, enrollResult]);
+
+  // Refetched whenever the campaign changes or a new send lands (enrollResult)
+  // — not on statusFilter/page, since this rollup describes the whole
+  // campaign regardless of which slice of the table is showing.
+  useEffect(() => {
+    let cancelled = false;
+    setStuckRollupError(null);
+    fetchStuckLeadRollup(campaign._id)
+      .then((r) => !cancelled && setStuckRollup(r))
+      .catch((err) => !cancelled && setStuckRollupError(err.message));
+    return () => {
+      cancelled = true;
+    };
+  }, [campaign._id, enrollResult]);
 
   useEffect(() => setMembersPage(1), [filterKey]);
 
@@ -454,6 +535,10 @@ function CampaignDetail({
   const enrollmentColumns = [
     { key: "phone", header: "Phone", get: (d) => d.phone },
     { key: "status", header: "Drip", get: (d) => d.status },
+    // Why the engine parked this lead (statusReason) — blank for a lead that
+    // is progressing normally. See fetchStuckLeadRollup above for where the
+    // campaign-wide version of this same field is rolled up.
+    { key: "statusReason", header: "Reason", get: (d) => d.statusReason || "" },
     // What WhatsApp reported back, as opposed to how far the drip got.
     { key: "delivery", header: "Delivery", get: (d) => <DeliveryCell delivery={d.delivery} /> },
     { key: "replied", header: "Replied", get: (d) => (d.delivery?.replied || d.delivery?.received ? "yes" : "") },
@@ -674,6 +759,34 @@ function CampaignDetail({
               product. */}
           <h4>Activity after this campaign</h4>
           <CampaignActivity campaignId={campaign._id} refreshKey={enrollResult} />
+
+          {/* Campaign-wide, not page-scoped -- see fetchStuckLeadRollup above for
+              how that is achieved without a backend change. Renders nothing
+              at all (not an empty box) once loaded if nothing is stuck. */}
+          {stuckRollupError && (
+            <p className="error">Could not load the stuck-leads breakdown: {stuckRollupError}</p>
+          )}
+          {stuckRollup && stuckRollup.total > 0 && (
+            <div className="stuck-rollup">
+              <h4>Why leads are stuck ({stuckRollup.total} paused or failed, campaign-wide)</h4>
+              <ul className="stuck-rollup-list">
+                {stuckRollup.reasons.map((r) => (
+                  <li key={`${r.status} ${r.reason}`} className="stuck-rollup-row">
+                    <span className={`badge ${r.status === "failed" ? "badge-danger" : "badge-warning"}`}>{r.count}</span>
+                    <span className="stuck-rollup-reason">{r.reason}</span>
+                    <span className="muted">({r.status})</span>
+                  </li>
+                ))}
+              </ul>
+              {!stuckRollup.complete && (
+                <p className="muted">
+                  This campaign has more paused/failed leads than the breakdown scanned ({ROLLUP_MAX_PAGES * ROLLUP_PAGE_SIZE} per
+                  status) -- the {stuckRollup.total} total above is exact, but the reason counts below only cover what was
+                  scanned, not every one of them.
+                </p>
+              )}
+            </div>
+          )}
 
           <h4>Enrollments</h4>
           <select value={statusFilter} onChange={(e) => { setStatusFilter(e.target.value); setPage(1); }}>
