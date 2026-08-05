@@ -6,6 +6,22 @@
  * credentials come from.
  */
 
+// Tagged with the structured fields lib/errorClassification.js reads —
+// httpStatus, providerErrorCode, providerResponse — instead of leaving the
+// caller to regex a status code back out of the message string, which is the
+// same convention lib/sendingSwitch.js's sendingDisabledError and
+// lib/whatsappProvider.js's notAllowlistedError/windowClosedError already
+// use for the errors they tag. providerErrorCode is best-effort: WATI's error
+// bodies aren't consistent about which key carries it, so every spelling seen
+// so far is checked.
+function sendError(message, httpStatus, data) {
+  const err = new Error(message);
+  err.httpStatus = httpStatus;
+  err.providerErrorCode = (data && (data.errorCode ?? data.error_code ?? data.code)) ?? undefined;
+  err.providerResponse = data;
+  return err;
+}
+
 // phone: digits only, with country code (e.g. "919876543210") — no "+".
 // params: ordered array of strings filling the template's {{1}}, {{2}}, ...
 // channelNumber: WhatsApp number to send from, e.g. "+916383514285" —
@@ -31,7 +47,7 @@ async function sendTemplateMessage({ endpoint, token, phone, templateName, broad
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data.result === false) {
     const detail = data.info || data.message || JSON.stringify(data);
-    throw new Error(`WATI send failed (${res.status}): ${detail}`);
+    throw sendError(`WATI send failed (${res.status}): ${detail}`, res.status, data);
   }
   return data;
 }
@@ -59,7 +75,7 @@ async function sendSessionMessage({ endpoint, token, phone, text, channelNumber 
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data.result === false) {
     const detail = data.info || data.message || JSON.stringify(data);
-    throw new Error(`WATI session send failed (${res.status}): ${detail}`);
+    throw sendError(`WATI session send failed (${res.status}): ${detail}`, res.status, data);
   }
   return data;
 }
@@ -75,7 +91,7 @@ async function getMessageTemplates({ endpoint, token }) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const detail = data.info || data.message || JSON.stringify(data);
-    throw new Error(`WATI getMessageTemplates failed (${res.status}): ${detail}`);
+    throw sendError(`WATI getMessageTemplates failed (${res.status}): ${detail}`, res.status, data);
   }
   return (data.messageTemplates || []).map((t) => ({ name: t.elementName, status: t.status }));
 }

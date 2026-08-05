@@ -119,6 +119,21 @@ const enrollmentSchema = new Schema(
     // lead's next inbound message re-opens the window. Written and cleared by
     // applyWalkResult on every tick, same lifetime as statusReason.
     statusReasonCode: { type: String, trim: true },
+    // How many consecutive times the message node currently sitting in
+    // currentNodeId has failed to send, since its last success. Reset to 0 the
+    // moment a send lands, so the streak never carries over onto a later node
+    // in the flow - see the message node's catch block and the reset right
+    // after a successful send in lib/campaignEngine.js. No migration needed:
+    // Mongoose applies this default when hydrating any existing document whose
+    // path is absent, the same way historyEntrySchema.kind's default above
+    // already does for rows written before that field existed.
+    sendAttempts: { type: Number, default: 0 },
+    // The lib/errorClassification.js bucket ("retryable" | "undeliverable" |
+    // "terminal") the most recent failed attempt fell into - null once a send
+    // has succeeded. Not an enum: the classifier is the one place that name
+    // list is allowed to grow, and pinning it again here would mean editing
+    // two files every time it does.
+    lastAttemptClass: { type: String, trim: true },
     nextSendAt: { type: Date, required: true, index: true },
     history: { type: [historyEntrySchema], default: [] },
   },
