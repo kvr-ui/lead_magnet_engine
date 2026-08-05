@@ -155,6 +155,17 @@ async function disconnect() {
   await WhatsAppIntegration.updateMany({ active: true }, { $set: { active: false } });
 }
 
+// Generates a fresh webhook secret for the active integration and saves it,
+// invalidating the old one immediately. Used from the Integrations tab when
+// an operator suspects a leak or has shared the webhook URL too widely.
+async function rotateWebhookSecret() {
+  const doc = await getActiveDoc();
+  if (!doc) throw new Error(NOT_CONNECTED);
+  doc.webhookSecret = crypto.randomBytes(24).toString("hex");
+  await doc.save();
+  return status(doc);
+}
+
 // Looked up by routes/wati.js to verify the shared secret on inbound webhook
 // calls. Checks the secret directly against Mongo (not the request's own
 // active-doc lookup) since a webhook call carries no other identifying info.
@@ -186,6 +197,7 @@ module.exports = {
   sendMessage,
   connect,
   disconnect,
+  rotateWebhookSecret,
   status: getStatus,
   findBySecret,
 };

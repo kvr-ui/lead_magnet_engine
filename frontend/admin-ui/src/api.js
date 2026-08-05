@@ -360,3 +360,7 @@ export function connectWhatsApp({ endpoint, token, channels }) {
 export function disconnectWhatsApp() {
   return sendJSON("POST", "/api/integrations/whatsapp/disconnect");
 }
+
+export function rotateWebhookSecret() {
+  return sendJSON("POST", "/api/integrations/whatsapp/rotate-secret");
+}

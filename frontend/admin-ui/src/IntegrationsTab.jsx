@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { fetchIntegrationStatus, connectWhatsApp, disconnectWhatsApp } from "./api";
+import { fetchIntegrationStatus, connectWhatsApp, disconnectWhatsApp, rotateWebhookSecret } from "./api";
 
 function emptyChannel() {
   return { id: "", label: "" };
@@ -15,6 +15,7 @@ export default function IntegrationsTab() {
   const [token, setToken] = useState("");
   const [channels, setChannels] = useState([emptyChannel()]);
   const [connecting, setConnecting] = useState(false);
+  const [rotating, setRotating] = useState(false);
 
   function reload() {
     setLoading(true);
@@ -57,6 +58,29 @@ export default function IntegrationsTab() {
       reload();
     } catch (err) {
       setError(err.message);
+    }
+  }
+
+  async function handleRotateSecret() {
+    if (
+      !window.confirm(
+        "Rotate the webhook secret? The current webhook URL will stop working immediately. " +
+          "Delivery, read, and reply tracking — and STOP opt-outs — will silently stop arriving until " +
+          "you paste the new URL into WATI's webhook configuration."
+      )
+    ) {
+      return;
+    }
+    setError(null);
+    setRotating(true);
+    try {
+      const next = await rotateWebhookSecret();
+      setStatus(next);
+      setCopied(false);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setRotating(false);
     }
   }
 
@@ -111,6 +135,14 @@ export default function IntegrationsTab() {
                       }}
                     >
                       {copied ? "Copied!" : "Copy"}
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-btn danger"
+                      onClick={handleRotateSecret}
+                      disabled={rotating}
+                    >
+                      {rotating ? "Rotating…" : "Rotate"}
                     </button>
                   </div>
                 </label>
