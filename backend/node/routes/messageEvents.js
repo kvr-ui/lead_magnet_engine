@@ -2,6 +2,7 @@ const { Types } = require("mongoose");
 const MessageEvent = require("../models/MessageEvent");
 const Campaign = require("../models/Campaign");
 const CampaignEnrollment = require("../models/CampaignEnrollment");
+const CampaignNodeVisit = require("../models/CampaignNodeVisit");
 const DirectMessage = require("../models/DirectMessage");
 const { asyncRouter } = require("../lib/asyncRouter");
 const { resolveSource } = require("../lib/sourceResolver");
@@ -84,6 +85,137 @@ router.get("/campaigns/:id/delivery", async (req, res) => {
     funnelOrder: FUNNEL_ORDER,
     counts: withZeroes(counts.get("all")),
   });
+});
+
+// Per-node funnel for one campaign's one graph version (task 10): how many
+// distinct leads reached each node, how many of that node's sends succeeded
+// or errored, and how many leads are parked there right now. A node id means
+// something only inside the graph version that declared it — the same reason
+// an enrollment pins its graphVersion for life instead of tracking the
+// campaign's liveVersion (see graphNodeIndex below) — so every count here is
+// scoped to exactly one version. Enrollments pinned to any other version are
+// rolled into a single `otherVersions.count` instead of being placed on nodes
+// that version may not have, or may have reused for something structurally
+// different.
+//
+// Per node:
+//   reached    - distinct leads with a CampaignNodeVisit row for the node
+//                (task 4). This is the only source with anything to say about
+//                a filter/condition/split/goal/wait/source/exit node, none of
+//                which ever write a CampaignEnrollment.history entry.
+//   sent/error - distinct leads with a history entry at the node whose status
+//                was a success ("sent" for a message, "ok" for an action - the
+//                two success spellings the schema uses for the two kinds that
+//                write history at all) or "error". Counted by lead, not by raw
+//                entry, the same idiom rollup() above uses for MessageEvent.
+//   parkedHere - enrollments currently sitting on the node (currentNodeId)
+//                whose status still means something unresolved: active (due
+//                to be ticked again), paused, or failed. Completed/cancelled
+//                enrollments are done, not parked, and are excluded.
+//
+// Deliberately a dumb counter: no edge topology, no drop-off percentages, no
+// verdict on what a number means. That belongs to whichever caller composes
+// these into something.
+async function nodeFunnel(campaignId, requestedVersion) {
+  const campaign = await Campaign.findById(campaignId).select("draft versions liveVersion").lean();
+  if (!campaign) return null;
+
+  // Undefined/null means "the caller didn't ask" - default to the campaign's
+  // live version, same default enrolling itself uses for a brand-new lead.
+  const graphVersion =
+    requestedVersion === undefined || requestedVersion === null ? campaign.liveVersion : requestedVersion;
+
+  // Reused, not re-derived: this is the exact helper the per-enrollment detail
+  // and /sends already resolve a node against its pinned graph version with.
+  const nodeIndex = graphNodeIndex(campaign, graphVersion);
+
+  const scoped = { campaign: campaign._id, graphVersion };
+
+  const [visitRows, historyRows, parkedRows, otherVersionCount] = await Promise.all([
+    CampaignNodeVisit.aggregate([{ $match: scoped }, { $group: { _id: "$nodeId", leads: { $addToSet: "$enrollment" } } }]),
+    CampaignEnrollment.aggregate([
+      { $match: scoped },
+      { $unwind: "$history" },
+      { $match: { "history.status": { $in: ["sent", "ok", "error"] } } },
+      {
+        $group: {
+          _id: {
+            nodeId: "$history.nodeId",
+            outcome: { $cond: [{ $eq: ["$history.status", "error"] }, "error", "sent"] },
+          },
+          leads: { $addToSet: "$_id" },
+        },
+      },
+    ]),
+    CampaignEnrollment.aggregate([
+      { $match: { ...scoped, status: { $in: ["active", "paused", "failed"] } } },
+      { $group: { _id: "$currentNodeId", count: { $sum: 1 } } },
+    ]),
+    // Not scoped to graphVersion - the whole point is everyone who ISN'T on it.
+    CampaignEnrollment.countDocuments({ campaign: campaign._id, graphVersion: { $ne: graphVersion } }),
+  ]);
+
+  const reachedByNode = new Map(visitRows.map((r) => [r._id, r.leads.filter(Boolean).length]));
+  const sentByNode = new Map();
+  const errorByNode = new Map();
+  for (const row of historyRows) {
+    (row._id.outcome === "error" ? errorByNode : sentByNode).set(row._id.nodeId, row.leads.filter(Boolean).length);
+  }
+  const parkedByNode = new Map(parkedRows.filter((r) => r._id).map((r) => [r._id, r.count]));
+
+  // The graph's own node list first, in graph order, so a node with zero of
+  // everything (a fresh publish, or a campaign with no enrollments at all)
+  // still reports a zeroed row instead of being silently absent. Anything
+  // counted against a node id the current index doesn't recognise - stray or
+  // pre-graph data - is appended after, rather than dropped.
+  const nodeIds = [...nodeIndex.keys()];
+  const seen = new Set(nodeIds);
+  for (const id of [...reachedByNode.keys(), ...sentByNode.keys(), ...errorByNode.keys(), ...parkedByNode.keys()]) {
+    if (!seen.has(id)) {
+      seen.add(id);
+      nodeIds.push(id);
+    }
+  }
+
+  const nodes = nodeIds.map((nodeId) => {
+    const info = describeNode(nodeIndex, nodeId);
+    return {
+      nodeId,
+      label: info ? info.label : null,
+      templateId: info ? info.templateId : null,
+      reached: reachedByNode.get(nodeId) || 0,
+      sent: sentByNode.get(nodeId) || 0,
+      error: errorByNode.get(nodeId) || 0,
+      parkedHere: parkedByNode.get(nodeId) || 0,
+    };
+  });
+
+  return {
+    campaign: String(campaign._id),
+    graphVersion,
+    nodes,
+    otherVersions: { count: otherVersionCount },
+  };
+}
+
+// GET /api/campaigns/:id/node-funnel — read-only per-node aggregation for one
+// campaign, scoped to one graph version (defaulting to the campaign's live
+// one). See nodeFunnel above for exactly what each count means.
+router.get("/campaigns/:id/node-funnel", async (req, res) => {
+  const campaignId = asObjectId(req.params.id);
+  if (!campaignId) return res.status(400).json({ error: "Invalid campaign id" });
+
+  let requestedVersion;
+  if (req.query.graphVersion !== undefined) {
+    requestedVersion = parseInt(req.query.graphVersion, 10);
+    if (!Number.isInteger(requestedVersion)) {
+      return res.status(400).json({ error: "graphVersion must be an integer" });
+    }
+  }
+
+  const result = await nodeFunnel(campaignId, requestedVersion);
+  if (!result) return res.status(404).json({ error: "Campaign not found" });
+  res.json(result);
 });
 
 // A target document is whatever the connected source happens to hold, and a
@@ -544,3 +676,8 @@ function escapeRegex(s) {
 module.exports = router;
 module.exports.FUNNEL_ORDER = FUNNEL_ORDER;
 module.exports.OUTCOME_ORDER = OUTCOME_ORDER;
+// Hung off the router so tools/verify-node-funnel.js can drive the real
+// aggregation directly against a real Mongo connection, without standing up
+// the app or its HTTP layer — same reasoning as campaigns.js's
+// module.exports.distinctValues.
+module.exports.nodeFunnel = nodeFunnel;
