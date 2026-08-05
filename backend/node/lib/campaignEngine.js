@@ -17,7 +17,11 @@ const { isSendingEnabled } = require("./sendingSwitch");
 // a burst.
 const BATCH_SIZE = parseInt(process.env.CAMPAIGN_BATCH_SIZE, 10) || 20;
 const SEND_GAP_MS = parseInt(process.env.CAMPAIGN_SEND_GAP_MS, 10) || 1000;
-const POLL_INTERVAL_MS = parseInt(process.env.CAMPAIGN_POLL_INTERVAL_MS, 10) || 5 * 60 * 1000;
+// The interval governs mid-flow progress — a wait that has elapsed, the node
+// after a send — not the first message of an enrol: /enroll kicks a tick of
+// its own the moment it has written its rows, so nothing that is due the
+// instant it is created sits waiting for the clock.
+const POLL_INTERVAL_MS = parseInt(process.env.CAMPAIGN_POLL_INTERVAL_MS, 10) || 30 * 1000;
 // How often armed campaigns rescan their source for newly-matching targets.
 // Separate from the send poll because it's a different kind of work: a full
 // scan of an external database rather than a read of our own due queue.
@@ -1441,6 +1445,32 @@ async function processAutoEnroll() {
 let pollHandle = null;
 let autoEnrollHandle = null;
 let autoEnrollRunning = false;
+let pollRunning = false;
+
+// One send tick at a time, whoever asked for it. Load-bearing rather than
+// tidy: a due row is not claimed when it is loaded, so two overlapping ticks
+// would each walk the same enrollment and each send its message. The interval
+// and the kick after an enrol both come through here for that reason.
+async function runPollTick() {
+  if (pollRunning) return { processed: 0, skipped: "a poll tick is already running" };
+  pollRunning = true;
+  try {
+    return await processDueEnrollments();
+  } finally {
+    pollRunning = false;
+  }
+}
+
+// An enrol writes rows that are due the moment they exist, so run a tick
+// straight away rather than leaving the first message of a campaign sitting in
+// the queue until the interval next comes round.
+//
+// Fire-and-forget on purpose: never awaited by the caller and never throwing
+// at it, because a tick that fails must not turn a successful enrol into an
+// error response — the rows are written either way, and the interval retries.
+function kickPoll() {
+  runPollTick().catch((err) => console.error("[campaignEngine] kick error:", err.message));
+}
 
 // Always polls, regardless of whether a provider is connected at boot —
 // the connection can be made/broken later from the Integrations tab without
@@ -1449,7 +1479,7 @@ let autoEnrollRunning = false;
 function startScheduler() {
   if (pollHandle) return;
   pollHandle = setInterval(() => {
-    processDueEnrollments().catch((err) => console.error("[campaignEngine] poll error:", err.message));
+    runPollTick().catch((err) => console.error("[campaignEngine] poll error:", err.message));
   }, POLL_INTERVAL_MS);
   console.log(`[campaignEngine] polling every ${POLL_INTERVAL_MS}ms for due drip messages (when a provider is connected)`);
 
@@ -1485,5 +1515,6 @@ module.exports = {
   processDueEnrollments,
   processAutoEnroll,
   startScheduler,
+  kickPoll,
   MAX_HOPS_PER_TICK,
 };

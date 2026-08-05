@@ -2,7 +2,7 @@ const express = require("express");
 const Campaign = require("../models/Campaign");
 const CampaignEnrollment = require("../models/CampaignEnrollment");
 const MessageEvent = require("../models/MessageEvent");
-const { sendSingleMessage } = require("../lib/campaignEngine");
+const { sendSingleMessage, kickPoll } = require("../lib/campaignEngine");
 const { previewCampaignTargets, enrollCampaignTargets } = require("../lib/campaignTargets");
 const whatsappProvider = require("../lib/whatsappProvider");
 const DataSourceConnection = require("../models/DataSourceConnection");
@@ -654,6 +654,16 @@ router.post("/campaigns/:id/enroll", async (req, res) => {
       await campaign.save();
     }
     res.status(201).json({ ...result, autoEnroll: campaign.autoEnroll });
+    // Every row this just wrote is due immediately, so ask the engine to run a
+    // tick now instead of letting the first message wait out the poll interval
+    // — which is what made a send appear to do nothing for minutes.
+    //
+    // After the response and never awaited: enrolling succeeded whatever the
+    // tick does, and the kill switch/provider checks inside it still decide
+    // whether anything is actually sent. Unconditional rather than only when
+    // result.enrolled > 0, because a re-enrol that adds nobody can still leave
+    // earlier rows due, and a tick with nothing to do is one indexed query.
+    kickPoll();
   } catch (err) {
     res.status(400).json({ error: "Enroll failed", detail: err.message });
   }

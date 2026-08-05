@@ -107,6 +107,40 @@ function engagementStatusOf(config) {
 // evaluateEngagement throw, which parks the lead.
 const ENGAGEMENT_STATUSES = new Set(["sent", "delivered", "read", "replied", "failed"]);
 
+// Which branches the walker asks pickEdge() for, per kind — "yes"/"no" for the
+// two that test something about the lead, "a"/"b" for a split.
+//
+// `goal` is deliberately absent. Its dangling branch is not a mistake:
+// campaignEngine.js finishes a met goal with no outgoing edge as a conversion
+// on purpose ("a 'yes' branch with nowhere to go is still a conversion"), so
+// warning about it would flag an idiomatic ending.
+const BRANCHES_BY_KIND = {
+  condition: ["yes", "no"],
+  filter: ["yes", "no"],
+  split: ["a", "b"],
+};
+
+// How each kind names itself in a message, matching the per-kind warnings
+// above ("Condition \"...\"", "Split \"...\"").
+const KIND_TITLES = { condition: "Condition", filter: "Filter", split: "Split" };
+
+// campaignEngine.js's normalizeBranch(): edges are matched on a trimmed,
+// lower-cased label, and a blank one counts as no label at all.
+function normalizeBranch(value) {
+  if (value === undefined || value === null) return null;
+  const text = String(value).trim().toLowerCase();
+  return text.length ? text : null;
+}
+
+// Mirrors campaignEngine.js's pickEdge(): an exact label match wins, and
+// "yes" alone (AFFIRMATIVE_BRANCHES) falls back to an unlabelled edge. Every
+// other branch needs an edge carrying its own label, or a lead sent down it
+// finds nothing and the walk ends there.
+function branchHasEdge(branch, labels, hasUnlabelled) {
+  if (labels.has(branch)) return true;
+  return branch === "yes" && hasUnlabelled;
+}
+
 /**
  * Can `fromId` be reached backwards from `toId` without passing a wait node?
  *
@@ -203,10 +237,15 @@ export function validateGraph(graph) {
   // to -> [from], for walking the graph backwards from a condition node to the
   // message it asks about.
   const incomingByNode = new Map();
+  // from -> [edge], for checking that every branch a node can take has
+  // somewhere to go.
+  const outgoingByNode = new Map();
   for (const edge of edges) {
     if (!edge || !edge.from || !edge.to) continue;
     if (!incomingByNode.has(edge.to)) incomingByNode.set(edge.to, []);
     incomingByNode.get(edge.to).push(edge.from);
+    if (!outgoingByNode.has(edge.from)) outgoingByNode.set(edge.from, []);
+    outgoingByNode.get(edge.from).push(edge);
   }
 
   let sourceCount = 0;
@@ -344,6 +383,37 @@ export function validateGraph(graph) {
 
       default:
         break;
+    }
+
+    // A branch with nowhere to go is the quietest way a flow can go wrong: the
+    // walker takes it, finds no edge, and ends the lead as "completed" with a
+    // reason nobody reads. Half a flow then looks finished rather than broken —
+    // a condition wired only for "no" sends everyone who *did* engage straight
+    // to the exit, and the follow-up on the other branch never fires for them.
+    //
+    // A warning rather than an error: ending a lead on one branch is a real
+    // design (nudge the ones who ignored you, leave the rest alone), so this
+    // must describe what happens, not block publishing it.
+    const branches = BRANCHES_BY_KIND[node.kind];
+    if (branches && node.id) {
+      const outgoing = outgoingByNode.get(node.id) || [];
+      const labels = new Set(outgoing.map((e) => normalizeBranch(e.branch)).filter(Boolean));
+      const hasUnlabelled = outgoing.some((e) => !normalizeBranch(e.branch));
+      const missing = branches.filter((branch) => !branchHasEdge(branch, labels, hasUnlabelled));
+      const title = KIND_TITLES[node.kind];
+      if (missing.length === branches.length) {
+        // Saying it twice for a node wired to nothing at all reads as two
+        // problems when there is only one.
+        pushWarning(warnings, node, `${title} "${name}" is not connected to anything, so every lead reaching it stops there.`);
+      } else {
+        for (const branch of missing) {
+          pushWarning(
+            warnings,
+            node,
+            `${title} "${name}" has no "${branch}" branch, so every lead it sends down "${branch}" stops there instead of carrying on.`
+          );
+        }
+      }
     }
 
     // Orphan check applies to every kind except source: a source is meant to
