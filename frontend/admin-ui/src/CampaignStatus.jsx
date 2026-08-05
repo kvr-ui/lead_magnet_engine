@@ -50,7 +50,16 @@ function findLiveGraph(campaign) {
 // has to be unambiguous that enrolled leads keep walking the published
 // version until a publish happens, which is exactly the misunderstanding
 // this strip exists to prevent.
-function buildSentence({ active, sendingEnabled, hasPublished, draftDiffers, liveVersion, autoEnroll, filterText }) {
+function buildSentence({
+  active,
+  sendingEnabled,
+  hasPublished,
+  liveGraphKnown,
+  draftDiffers,
+  liveVersion,
+  autoEnroll,
+  filterText,
+}) {
   const clauses = [];
 
   if (!active) {
@@ -65,6 +74,11 @@ function buildSentence({ active, sendingEnabled, hasPublished, draftDiffers, liv
 
   if (!hasPublished) {
     clauses.push("it has never been published, so nobody can enroll yet");
+  } else if (!liveGraphKnown) {
+    // The published graph hasn't loaded yet, so whether the draft differs is
+    // simply unknown. Say only what is certain — claiming a match here is how
+    // this strip would tell the exact lie it exists to prevent.
+    clauses.push(`version ${liveVersion} is live`);
   } else if (draftDiffers) {
     clauses.push(
       `the draft on the canvas differs from published version ${liveVersion} — enrolled leads keep walking version ${liveVersion} until you publish`
@@ -73,7 +87,13 @@ function buildSentence({ active, sendingEnabled, hasPublished, draftDiffers, liv
     clauses.push(`the canvas matches the live published version (v${liveVersion})`);
   }
 
-  if (autoEnroll) {
+  // Auto-enroll only rescans while the campaign is active: the sweep selects
+  // on { autoEnroll: true, active: true } (see campaignEngine.js). Saying
+  // "rescanning" for a paused campaign would claim work the backend is not
+  // doing — and it is the paused case where an operator most needs the truth.
+  if (autoEnroll && !active) {
+    clauses.push("auto-enroll is armed but paused with the campaign, so the source is not being rescanned");
+  } else if (autoEnroll) {
     clauses.push(`auto-enroll is rescanning the source for ${filterText}`);
   } else {
     clauses.push("auto-enroll is off, so only leads enrolled by hand join");
@@ -92,7 +112,13 @@ export default function CampaignStatus({
 }) {
   const hasPublished = campaign.liveVersion !== null && campaign.liveVersion !== undefined;
   const liveGraph = findLiveGraph(campaign);
-  const draftDiffers = hasPublished && liveGraph ? !graphsEqual(campaign.draft, liveGraph) : false;
+  // The list shape carries `liveVersion` but no `versions[]` (stripped
+  // server-side), so on first paint the published graph is unavailable and
+  // "differs?" is unanswerable rather than false. Track that as its own state
+  // — collapsing it into `draftDiffers === false` would render a confident
+  // "the canvas matches live" for a draft that in fact differs.
+  const liveGraphKnown = hasPublished && liveGraph !== null;
+  const draftDiffers = liveGraphKnown ? !graphsEqual(campaign.draft, liveGraph) : false;
 
   const filterText = describeFilter(campaign.autoEnrollFilter);
 
@@ -100,6 +126,7 @@ export default function CampaignStatus({
     active: campaign.active,
     sendingEnabled,
     hasPublished,
+    liveGraphKnown,
     draftDiffers,
     liveVersion: campaign.liveVersion,
     autoEnroll: campaign.autoEnroll,
@@ -130,15 +157,21 @@ export default function CampaignStatus({
         )}
 
         {!hasPublished && <span className="badge badge-neutral">Never published</span>}
-        {hasPublished && !draftDiffers && <span className="badge badge-success">Live: v{campaign.liveVersion}</span>}
-        {hasPublished && draftDiffers && (
+        {hasPublished && !liveGraphKnown && (
+          <span className="badge badge-neutral">Live: v{campaign.liveVersion}</span>
+        )}
+        {liveGraphKnown && !draftDiffers && <span className="badge badge-success">Live: v{campaign.liveVersion}</span>}
+        {liveGraphKnown && draftDiffers && (
           <span className="badge badge-warning">Draft differs from v{campaign.liveVersion}</span>
         )}
 
-        {campaign.autoEnroll && campaign.lastAutoEnrollError && (
+        {campaign.autoEnroll && !campaign.active && (
+          <span className="badge badge-neutral">Auto-enroll paused</span>
+        )}
+        {campaign.autoEnroll && campaign.active && campaign.lastAutoEnrollError && (
           <span className="badge badge-warning">Auto-enroll error</span>
         )}
-        {campaign.autoEnroll && !campaign.lastAutoEnrollError && (
+        {campaign.autoEnroll && campaign.active && !campaign.lastAutoEnrollError && (
           <span className="badge badge-info">Auto-enroll scanning</span>
         )}
         {!campaign.autoEnroll && <span className="badge badge-neutral">Auto-enroll off</span>}

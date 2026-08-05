@@ -646,7 +646,15 @@ function CampaignDetail({
           >
             {t.label}
             {t.id === "flow" && flowDirty && (
-              <span className="campaign-subtab-dirty" title="Unsaved changes on the canvas" aria-label="unsaved changes" />
+              // FlowCanvas computes this as "differs from the last *published*
+              // version", not "differs from the last save" — so a saved-but-
+              // unpublished draft keeps the dot lit. Labelled for what it
+              // actually tracks rather than for what it is not.
+              <span
+                className="campaign-subtab-dirty"
+                title="The canvas differs from the live published version"
+                aria-label="unpublished changes"
+              />
             )}
           </button>
         ))}
