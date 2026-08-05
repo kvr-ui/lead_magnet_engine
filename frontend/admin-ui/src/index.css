@@ -1604,3 +1604,75 @@ select:focus-visible {
     animation: none !important;
   }
 }
+
+/* --- ConfirmDialog --------------------------------------------------------
+   The admin UI's first modal: replaces window.confirm on actions with real
+   consequences (sending a campaign, deleting one). Backdrop + centered panel,
+   built from the same surface/border/shadow tokens as .panel so it reads as
+   part of this app rather than a bolted-on library default. */
+
+.confirm-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.25rem;
+  background: rgba(6, 6, 17, 0.72);
+  backdrop-filter: blur(2px);
+}
+
+.confirm-dialog {
+  width: 100%;
+  max-width: 28rem;
+  max-height: calc(100vh - 2.5rem);
+  overflow-y: auto;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  padding: 1.375rem;
+  box-shadow: var(--shadow-md);
+}
+
+.confirm-dialog:focus-visible {
+  outline: none;
+}
+
+.confirm-dialog-title {
+  margin: 0 0 0.75rem;
+}
+
+.confirm-dialog-body {
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+.confirm-dialog-body p {
+  margin: 0 0 0.75rem;
+}
+
+.confirm-dialog-body p:last-child {
+  margin-bottom: 0;
+}
+
+.confirm-dialog-actions {
+  margin-top: 1.25rem;
+  justify-content: flex-end;
+}
+
+.confirm-dialog-confirm.destructive {
+  background: var(--danger);
+  border-color: var(--danger);
+}
+
+/* No lighter/darker danger token exists, so hover/active reuse var(--danger)
+   itself and lean on brightness() rather than introduce a new color. */
+.confirm-dialog-confirm.destructive:hover:not(:disabled) {
+  filter: brightness(1.12);
+}
+
+.confirm-dialog-confirm.destructive:active:not(:disabled) {
+  filter: brightness(0.92);
+}
