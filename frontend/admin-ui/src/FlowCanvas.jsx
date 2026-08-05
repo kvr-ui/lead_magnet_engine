@@ -379,6 +379,7 @@ function FlowCanvasInner({
   publishedNodes,
   publishedEdges,
   sources,
+  visible,
   onGraphChange,
   onValidityChange,
   onDirtyChange,
@@ -397,8 +398,26 @@ function FlowCanvasInner({
   const [presetsLoading, setPresetsLoading] = useState(true);
   const [presetsError, setPresetsError] = useState(null);
   const [savingPreset, setSavingPreset] = useState(false);
-  const { screenToFlowPosition } = useReactFlow();
+  const { screenToFlowPosition, fitView } = useReactFlow();
   const wrapperRef = useRef(null);
+  // A caller (CampaignDetail's Flow sub-tab) may keep this canvas mounted but
+  // hide it with `display: none` rather than unmounting it, so switching sub-
+  // tabs never drops unsaved graph edits held in the node/edge state above.
+  // React Flow only measures its container on mount; a hidden container
+  // measures 0x0, so the view can come back collapsed when it's shown again.
+  // Re-fitting on the false->true transition (and not on the initial mount,
+  // which the `fitView` prop below already handles) fixes that without
+  // touching anything else about this component.
+  const wasVisible = useRef(visible ?? true);
+  useEffect(() => {
+    const isVisible = visible ?? true;
+    if (isVisible && !wasVisible.current) {
+      const raf = requestAnimationFrame(() => fitView({ duration: 0 }));
+      wasVisible.current = isVisible;
+      return () => cancelAnimationFrame(raf);
+    }
+    wasVisible.current = isVisible;
+  }, [visible, fitView]);
   // Read inside onDrop, which is memoized on things that don't include the
   // preset list — a ref keeps the handler looking at the current library
   // without re-creating (and re-binding) it every time a preset is saved.
@@ -821,6 +840,13 @@ export default function FlowCanvas({
   publishedNodes = [],
   publishedEdges = [],
   sources = [],
+  // Whether this canvas is the currently-shown sub-tab. Optional and additive
+  // - a caller that always renders the canvas (e.g. the create-campaign form)
+  // never passes it and gets the old always-visible behaviour. A caller that
+  // hides this canvas with CSS instead of unmounting it (see CampaignsTab's
+  // Flow sub-tab) passes it so the view re-fits when shown again instead of
+  // coming back collapsed.
+  visible = true,
   onGraphChange,
   onValidityChange,
   onDirtyChange,
@@ -837,6 +863,7 @@ export default function FlowCanvas({
         publishedNodes={publishedNodes}
         publishedEdges={publishedEdges}
         sources={sources}
+        visible={visible}
         onGraphChange={onGraphChange}
         onValidityChange={onValidityChange}
         onDirtyChange={onDirtyChange}

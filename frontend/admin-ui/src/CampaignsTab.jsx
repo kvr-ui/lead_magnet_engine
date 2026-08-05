@@ -18,10 +18,11 @@ import {
 } from "./api";
 import LeadsTable from "./LeadsTable";
 import Pager from "./Pager";
-import FilterCondition, { buildMongoFilter, describeFilter } from "./FilterBuilder";
+import FilterCondition, { buildMongoFilter } from "./FilterBuilder";
 import { DeliveryFunnel, DeliveryCell, EnrollmentTimeline } from "./MessageDelivery";
 import CampaignActivity from "./LeadActivity";
 import FlowCanvas from "./FlowCanvas";
+import CampaignStatus from "./CampaignStatus";
 
 function humanizeKey(key) {
   const spaced = key.replace(/([a-z0-9])([A-Z])/g, "$1 $2");
@@ -224,6 +225,14 @@ function CreateCampaignForm({ sources, onCreated, onCancel }) {
 
 // --- Campaign detail: filter, preview, send, enrollments -----------------
 
+// The three sub-tabs a campaign's detail view is split into (task 5). Order
+// here is also render order and chip order.
+const DETAIL_TABS = [
+  { id: "flow", label: "Flow" },
+  { id: "audience", label: "Audience & Send" },
+  { id: "results", label: "Results" },
+];
+
 function CampaignDetail({
   campaign,
   sourceLabels,
@@ -232,16 +241,21 @@ function CampaignDetail({
   onChanged,
   onDuplicate,
   duplicating,
-  // Global sending state, lifted to the app root (see App.jsx) and threaded
-  // down through here. Not consumed by this component yet — a later task in
-  // this plan places CampaignStatus (which does consume it) into this panel.
-  // Aliased to an underscore-prefixed name because they're accepted, not
-  // used, here.
-  sendingEnabled: _sendingEnabled,
-  sendingQueued: _sendingQueued,
-  sendingBusy: _sendingBusy,
-  onToggleSending: _onToggleSending,
+  // Global sending kill switch, lifted to the app root (see App.jsx) and fed
+  // straight into CampaignStatus below, which is what actually renders it —
+  // this component just threads it through.
+  sendingEnabled,
+  sendingQueued,
+  sendingBusy,
+  onToggleSending,
 }) {
+  // Which sub-tab is showing. Only Flow needs "hide, don't unmount" treatment
+  // (see below) — Audience & Send and Results hold no state of their own that
+  // would be lost by unmounting; every piece of state they read lives here,
+  // in this component, regardless of which tab is on screen.
+  const [activeTab, setActiveTab] = useState("flow");
+  const [flowDirty, setFlowDirty] = useState(false);
+
   const [conditions, setConditions] = useState([]);
   const [preview, setPreview] = useState(null);
   const [previewedKey, setPreviewedKey] = useState(null);
@@ -397,18 +411,43 @@ function CampaignDetail({
     }
   }
 
+  // Bug fix (task 5, #22): this used to fire-and-forget with no try/catch and
+  // no in-flight state, so pausing a live campaign could fail silently — the
+  // button just sat there looking clickable while nothing happened. Given the
+  // same treatment as disarmAuto directly below: error surfaced, button
+  // disabled while the request is in flight. A dedicated busy/error pair
+  // (rather than reusing the segment-builder's `error`) because this action
+  // lives in the pinned header and has to report next to itself regardless of
+  // which sub-tab is showing — the segment builder's error paragraph is
+  // inside the Audience & Send panel and would be invisible from Results.
+  const [toggleBusy, setToggleBusy] = useState(false);
+  const [toggleError, setToggleError] = useState(null);
+
   async function toggleActive() {
-    await updateCampaign(campaign._id, { active: !campaign.active });
-    onChanged();
+    setToggleError(null);
+    setToggleBusy(true);
+    try {
+      await updateCampaign(campaign._id, { active: !campaign.active });
+      onChanged();
+    } catch (err) {
+      setToggleError(err.message);
+    } finally {
+      setToggleBusy(false);
+    }
   }
+
+  const [disarmBusy, setDisarmBusy] = useState(false);
 
   async function disarmAuto() {
     setError(null);
+    setDisarmBusy(true);
     try {
       await updateCampaign(campaign._id, { autoEnroll: false });
       onChanged();
     } catch (err) {
       setError(err.message);
+    } finally {
+      setDisarmBusy(false);
     }
   }
 
@@ -425,8 +464,31 @@ function CampaignDetail({
     { key: "createdAt", header: "Enrolled", get: (d) => (d.createdAt ? new Date(d.createdAt).toLocaleString() : "") },
   ];
 
+  // Bug fix (task 5, #22): Send used to go from "disabled" to "explained" only
+  // after the first preview ran — on first load it was just disabled, with no
+  // way to tell why. This covers every case Send can be disabled for (never
+  // previewed yet, or previewed against a segment that has since changed) so
+  // there is always a visible reason when there is one.
+  const sendDisabledReason =
+    previewedKey === null
+      ? "Preview this segment first — Send unlocks once a preview has run against it."
+      : previewedKey !== filterKey
+        ? "Segment changed — preview again before sending."
+        : null;
+
+  // CampaignStatus (task 3) needs the full detail shape — active, autoEnroll,
+  // liveVersion and every published version — to tell draft from published.
+  // `fullCampaign` carries that once it loads; until then this falls back to
+  // the list row, which has everything except `versions` (see GET
+  // /api/campaigns), so the strip still renders sensibly on first paint
+  // instead of waiting on a second fetch.
+  const statusCampaign = fullCampaign || campaign;
+
   return (
     <div className="panel">
+      {/* Pinned header: name, source/channel, the task-3 status strip, and the
+          Pause/Duplicate/Close actions. Rendered unconditionally above the
+          sub-tabs below, so it never moves when the active tab changes. */}
       <div className="step-card-head">
         <h3>
           {campaign.name}{" "}
@@ -436,8 +498,8 @@ function CampaignDetail({
           </span>
         </h3>
         <div>
-          <button type="button" className="secondary-btn" onClick={toggleActive}>
-            {campaign.active ? "Pause" : "Resume"}
+          <button type="button" className="secondary-btn" onClick={toggleActive} disabled={toggleBusy}>
+            {toggleBusy ? "Working…" : campaign.active ? "Pause" : "Resume"}
           </button>{" "}
           {/* Clones this flow into a new, unpublished campaign with no
               enrollments and auto-enroll off, then opens it — the "same
@@ -452,149 +514,189 @@ function CampaignDetail({
         </div>
       </div>
       {campaign.description && <p className="muted">{campaign.description}</p>}
-      {!campaign.active && <p className="notice">Paused — enrolled contacts won't receive further messages until resumed.</p>}
+      {toggleError && <p className="error">{toggleError}</p>}
 
-      {campaign.autoEnroll && (
-        <div className="notice">
-          <strong>Auto-enroll is on.</strong> The source is rescanned every few minutes for{" "}
-          <em>{describeFilter(campaign.autoEnrollFilter)}</em>, and anyone new who matches is enrolled and starts the
-          flow.{" "}
-          <button type="button" className="link-btn" onClick={disarmAuto}>
-            turn off
+      {/* Replaces the old standalone paused notice and auto-enroll notice —
+          both are now covered by this strip's badges and sentence, so they
+          are not repeated below. */}
+      <CampaignStatus
+        campaign={statusCampaign}
+        sendingEnabled={sendingEnabled}
+        sendingQueued={sendingQueued}
+        sendingBusy={sendingBusy}
+        onToggleSending={onToggleSending}
+      />
+
+      <div className="chip-row">
+        {DETAIL_TABS.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            className={`chip ${activeTab === t.id ? "active" : ""}`}
+            onClick={() => setActiveTab(t.id)}
+          >
+            {t.label}
+            {t.id === "flow" && flowDirty && (
+              <span className="campaign-subtab-dirty" title="Unsaved changes on the canvas" aria-label="unsaved changes" />
+            )}
           </button>
-          <br />
-          <span className="muted">
-            {campaign.lastAutoEnrollError
-              ? `Last check failed: ${campaign.lastAutoEnrollError}`
-              : campaign.lastAutoEnrollAt
-                ? `Last checked ${new Date(campaign.lastAutoEnrollAt).toLocaleString()} — added ${campaign.lastAutoEnrollCount || 0}.`
-                : "Not checked yet."}
-            {!campaign.active && " Paused, so rescanning is stopped too."}
-          </span>
+        ))}
+      </div>
+
+      {/* Flow sub-tab. Hidden with CSS instead of unmounted: the canvas holds
+          the graph in its own local node/edge state, and unmounting it on a
+          tab switch would silently throw away any unsaved edit — the exact
+          data-loss bug this restructure has to avoid. */}
+      <div className={activeTab === "flow" ? "campaign-subtab-panel" : "campaign-subtab-panel campaign-subtab-hidden"}>
+        {graphError && <p className="error">{graphError}</p>}
+        {fullCampaign ? (
+          <FlowCanvas
+            key={campaign._id}
+            campaignId={campaign._id}
+            initialNodes={(fullCampaign.draft && fullCampaign.draft.nodes) || []}
+            initialEdges={(fullCampaign.draft && fullCampaign.draft.edges) || []}
+            liveVersion={fullCampaign.liveVersion === undefined ? null : fullCampaign.liveVersion}
+            publishedNodes={livePublished.nodes}
+            publishedEdges={livePublished.edges}
+            sources={sources}
+            visible={activeTab === "flow"}
+            onDirtyChange={setFlowDirty}
+            onSaved={(updated) => {
+              setFullCampaign(updated);
+              onChanged();
+            }}
+            onPublished={(published) => {
+              setFullCampaign((prev) =>
+                prev && {
+                  ...prev,
+                  liveVersion: published.liveVersion,
+                  versions: [
+                    ...(prev.versions || []),
+                    { version: published.version, nodes: published.nodes, edges: published.edges, publishedAt: published.publishedAt },
+                  ],
+                }
+              );
+              onChanged();
+            }}
+          />
+        ) : (
+          !graphError && <p className="muted">Loading flow…</p>
+        )}
+      </div>
+
+      {activeTab === "audience" && (
+        <div className="campaign-subtab-panel">
+          <h4>Build a segment</h4>
+          {conditions.map((c, i) => (
+            <FilterCondition
+              key={i}
+              source={sourceId}
+              condition={c}
+              onChange={(next) => setConditions(conditions.map((cc, idx) => (idx === i ? next : cc)))}
+              onRemove={() => setConditions(conditions.filter((_, idx) => idx !== i))}
+            />
+          ))}
+          <button type="button" className="link-btn" onClick={() => setConditions([...conditions, { field: "", values: [] }])}>
+            + add condition
+          </button>
+          {!conditions.length && <p className="muted">No conditions — sending will target everyone in this source.</p>}
+
+          <h4>Matching members</h4>
+          <Pager page={members.page || membersPage} totalPages={members.totalPages} total={members.total} onChange={setMembersPage} />
+          <LeadsTable
+            columns={columns}
+            rows={members.members}
+            loading={false}
+            error={membersError}
+          />
+
+          {error && <p className="error">{error}</p>}
+
+          <div className="form-actions">
+            <button type="button" className="secondary-btn" onClick={handlePreview} disabled={busy}>
+              Preview
+            </button>
+            <button
+              type="button"
+              onClick={handleSend}
+              disabled={busy || previewedKey !== filterKey}
+              title={sendDisabledReason || undefined}
+            >
+              Send campaign
+            </button>
+            <label className="inline-check">
+              <input type="checkbox" checked={armAuto} onChange={(e) => setArmAuto(e.target.checked)} />{" "}
+              Keep this segment running
+            </label>
+          </div>
+          <p className="muted">
+            {armAuto
+              ? "New matches in the source will join this campaign automatically — no need to send again."
+              : "One-off send: only who matches right now is enrolled. Anyone added to the source later is not."}
+          </p>
+
+          {preview && previewedKey === filterKey && (
+            <p className="muted">
+              {preview.matched} matched · {preview.willEnroll} will be enrolled · {preview.alreadyEnrolled} already enrolled ·{" "}
+              {preview.skippedNoPhone} skipped (no phone) · {preview.skippedBadPhone} skipped (invalid phone)
+            </p>
+          )}
+          {sendDisabledReason && <p className="muted">{sendDisabledReason}</p>}
+          {enrollResult && (
+            <p className="notice">
+              Enrolled {enrollResult.enrolled} contacts. They'll start the flow on the next send cycle.
+            </p>
+          )}
+
+          {/* The status strip in the header already says whether auto-enroll
+              is on, what it's scanning for and when it last ran — this is
+              just the control to turn an already-armed campaign off, kept
+              next to the "keep this segment running" option above since
+              they're the same lever at two different points in time. */}
+          {campaign.autoEnroll && (
+            <p className="muted">
+              Auto-enroll is currently on for this campaign.{" "}
+              <button type="button" className="link-btn" onClick={disarmAuto} disabled={disarmBusy}>
+                {disarmBusy ? "Turning off…" : "Turn off auto-enroll"}
+              </button>
+            </p>
+          )}
         </div>
       )}
 
-      <h4>Flow</h4>
-      {graphError && <p className="error">{graphError}</p>}
-      {fullCampaign ? (
-        <FlowCanvas
-          key={campaign._id}
-          campaignId={campaign._id}
-          initialNodes={(fullCampaign.draft && fullCampaign.draft.nodes) || []}
-          initialEdges={(fullCampaign.draft && fullCampaign.draft.edges) || []}
-          liveVersion={fullCampaign.liveVersion === undefined ? null : fullCampaign.liveVersion}
-          publishedNodes={livePublished.nodes}
-          publishedEdges={livePublished.edges}
-          sources={sources}
-          onSaved={(updated) => {
-            setFullCampaign(updated);
-            onChanged();
-          }}
-          onPublished={(published) => {
-            setFullCampaign((prev) =>
-              prev && {
-                ...prev,
-                liveVersion: published.liveVersion,
-                versions: [
-                  ...(prev.versions || []),
-                  { version: published.version, nodes: published.nodes, edges: published.edges, publishedAt: published.publishedAt },
-                ],
-              }
-            );
-            onChanged();
-          }}
-        />
-      ) : (
-        !graphError && <p className="muted">Loading flow…</p>
+      {activeTab === "results" && (
+        <div className="campaign-subtab-panel">
+          <h4>Delivery</h4>
+          <DeliveryFunnel campaignId={campaign._id} refreshKey={enrollResult} />
+
+          {/* Delivery stops at the handset. This is the question after it:
+              once the message landed, did the lead actually go and use the
+              product. */}
+          <h4>Activity after this campaign</h4>
+          <CampaignActivity campaignId={campaign._id} refreshKey={enrollResult} />
+
+          <h4>Enrollments</h4>
+          <select value={statusFilter} onChange={(e) => { setStatusFilter(e.target.value); setPage(1); }}>
+            <option value="">All statuses</option>
+            <option value="active">Active</option>
+            <option value="completed">Completed</option>
+            <option value="paused">Paused</option>
+            <option value="cancelled">Cancelled</option>
+            <option value="failed">Failed</option>
+          </select>
+          <Pager page={enrollments.page || page} totalPages={enrollments.totalPages} total={enrollments.total} onChange={setPage} />
+          <p className="muted">Click a lead to see every message event recorded for them.</p>
+          <LeadsTable
+            columns={enrollmentColumns}
+            rows={enrollments.enrollments}
+            loading={false}
+            error={null}
+            onRowClick={setTimelineFor}
+            activeRowId={timelineFor?._id}
+          />
+          {timelineFor && <EnrollmentTimeline enrollment={timelineFor} onClose={() => setTimelineFor(null)} />}
+        </div>
       )}
-
-      <h4>Build a segment</h4>
-      {conditions.map((c, i) => (
-        <FilterCondition
-          key={i}
-          source={sourceId}
-          condition={c}
-          onChange={(next) => setConditions(conditions.map((cc, idx) => (idx === i ? next : cc)))}
-          onRemove={() => setConditions(conditions.filter((_, idx) => idx !== i))}
-        />
-      ))}
-      <button type="button" className="link-btn" onClick={() => setConditions([...conditions, { field: "", values: [] }])}>
-        + add condition
-      </button>
-      {!conditions.length && <p className="muted">No conditions — sending will target everyone in this source.</p>}
-
-      <h4>Matching members</h4>
-      <Pager page={members.page || membersPage} totalPages={members.totalPages} total={members.total} onChange={setMembersPage} />
-      <LeadsTable
-        columns={columns}
-        rows={members.members}
-        loading={false}
-        error={membersError}
-      />
-
-      {error && <p className="error">{error}</p>}
-
-      <div className="form-actions">
-        <button type="button" className="secondary-btn" onClick={handlePreview} disabled={busy}>
-          Preview
-        </button>
-        <button type="button" onClick={handleSend} disabled={busy || previewedKey !== filterKey}>
-          Send campaign
-        </button>
-        <label className="inline-check">
-          <input type="checkbox" checked={armAuto} onChange={(e) => setArmAuto(e.target.checked)} />{" "}
-          Keep this segment running
-        </label>
-      </div>
-      <p className="muted">
-        {armAuto
-          ? "New matches in the source will join this campaign automatically — no need to send again."
-          : "One-off send: only who matches right now is enrolled. Anyone added to the source later is not."}
-      </p>
-
-      {preview && previewedKey === filterKey && (
-        <p className="muted">
-          {preview.matched} matched · {preview.willEnroll} will be enrolled · {preview.alreadyEnrolled} already enrolled ·{" "}
-          {preview.skippedNoPhone} skipped (no phone) · {preview.skippedBadPhone} skipped (invalid phone)
-        </p>
-      )}
-      {previewedKey !== null && previewedKey !== filterKey && (
-        <p className="muted">Segment changed — preview again before sending.</p>
-      )}
-      {enrollResult && (
-        <p className="notice">
-          Enrolled {enrollResult.enrolled} contacts. They'll start the flow on the next send cycle.
-        </p>
-      )}
-
-      <h4>Delivery</h4>
-      <DeliveryFunnel campaignId={campaign._id} refreshKey={enrollResult} />
-
-      {/* Delivery stops at the handset. This is the question after it: once
-          the message landed, did the lead actually go and use the product. */}
-      <h4>Activity after this campaign</h4>
-      <CampaignActivity campaignId={campaign._id} refreshKey={enrollResult} />
-
-      <h4>Enrollments</h4>
-      <select value={statusFilter} onChange={(e) => { setStatusFilter(e.target.value); setPage(1); }}>
-        <option value="">All statuses</option>
-        <option value="active">Active</option>
-        <option value="completed">Completed</option>
-        <option value="paused">Paused</option>
-        <option value="cancelled">Cancelled</option>
-        <option value="failed">Failed</option>
-      </select>
-      <Pager page={enrollments.page || page} totalPages={enrollments.totalPages} total={enrollments.total} onChange={setPage} />
-      <p className="muted">Click a lead to see every message event recorded for them.</p>
-      <LeadsTable
-        columns={enrollmentColumns}
-        rows={enrollments.enrollments}
-        loading={false}
-        error={null}
-        onRowClick={setTimelineFor}
-        activeRowId={timelineFor?._id}
-      />
-      {timelineFor && <EnrollmentTimeline enrollment={timelineFor} onClose={() => setTimelineFor(null)} />}
     </div>
   );
 }
@@ -605,8 +707,8 @@ export default function CampaignsTab({
   focusCampaignId = null,
   // Global sending kill switch, lifted to the app root (see App.jsx) so it is
   // fetched exactly once and shared with the header toggle. Threaded straight
-  // through to CampaignDetail below, which does not consume it yet — a later
-  // task in this plan places CampaignStatus (which does) into that panel.
+  // through to CampaignDetail below, which feeds it to the CampaignStatus
+  // strip in its pinned header.
   sendingEnabled = null,
   sendingQueued = 0,
   sendingBusy = false,

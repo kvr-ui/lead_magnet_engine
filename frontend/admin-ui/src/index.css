@@ -1800,3 +1800,28 @@ select:focus-visible {
   border-color: var(--border-soft);
   background: var(--bg-inset);
 }
+
+/* --- Campaign detail sub-tabs (task 5, #22) ---------------------------
+   Reuses .chip-row/.chip (defined above, alongside .tabs/.tab) rather than
+   the top-level tab styling, so this reads as subordinate to the app's main
+   navigation. `.campaign-subtab-hidden` is what keeps the Flow panel out of
+   sight without unmounting it — see CampaignsTab.jsx for why unmounting it
+   on a tab switch would be a data-loss bug. */
+
+.campaign-subtab-panel {
+  margin-top: 0.25rem;
+}
+
+.campaign-subtab-hidden {
+  display: none;
+}
+
+.campaign-subtab-dirty {
+  display: inline-block;
+  width: 0.4rem;
+  height: 0.4rem;
+  margin-left: 0.4rem;
+  border-radius: 999px;
+  background: var(--warning);
+  vertical-align: middle;
+}
