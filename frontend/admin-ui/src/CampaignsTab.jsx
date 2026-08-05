@@ -23,6 +23,7 @@ import { DeliveryFunnel, DeliveryCell, EnrollmentTimeline } from "./MessageDeliv
 import CampaignActivity from "./LeadActivity";
 import FlowCanvas from "./FlowCanvas";
 import CampaignStatus from "./CampaignStatus";
+import ConfirmDialog from "./ConfirmDialog";
 
 function humanizeKey(key) {
   const spaced = key.replace(/([a-z0-9])([A-Z])/g, "$1 $2");
@@ -262,6 +263,11 @@ function CampaignDetail({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [enrollResult, setEnrollResult] = useState(null);
+  // Whether the send-confirmation dialog is up. Decoupled from `busy` (which
+  // tracks the actual in-flight request) because opening the dialog is a
+  // synchronous click with no request behind it yet — the request only
+  // starts once the dialog's own confirm button is pressed.
+  const [showSendConfirm, setShowSendConfirm] = useState(false);
   // Whether the send being set up should also arm auto-enroll. Seeded from the
   // campaign so re-sending an already-armed campaign doesn't silently disarm
   // it, and re-synced because the panel stays mounted across reloads.
@@ -381,18 +387,21 @@ function CampaignDetail({
     }
   }
 
-  async function handleSend() {
+  // Opens the task-2 dialog instead of sending straight away. Guarded the
+  // same way the button itself is (disabled without a fresh preview) so a
+  // stray call can't open a dialog with nothing to show.
+  function openSendConfirm() {
     if (!preview) return;
-    const confirmed = window.confirm(
-      `Send "${campaign.name}" to ${preview.willEnroll} ${sourceLabels[sourceId] || sourceId || "leads"}?\n\n` +
-        `${preview.matched} matched, ${preview.alreadyEnrolled} already enrolled, ` +
-        `${preview.skippedNoPhone + preview.skippedBadPhone} skipped (no/invalid phone).` +
-        (armAuto
-          ? `\n\nAuto-enroll ON — this segment keeps running, so anyone matching it later joins automatically.`
-          : "")
-    );
-    if (!confirmed) return;
+    setShowSendConfirm(true);
+  }
 
+  // The dialog's onConfirm: returning this promise is what puts the dialog
+  // into its pending state, so a slow send can't be double-fired from a
+  // second click on the dialog's own confirm button. Errors are caught here
+  // (not rethrown) so the dialog closes the same way on success or failure,
+  // surfacing the error in the page underneath rather than leaving the
+  // dialog stuck open.
+  async function confirmSend() {
     setError(null);
     setBusy(true);
     try {
@@ -408,6 +417,7 @@ function CampaignDetail({
       setError(err.message);
     } finally {
       setBusy(false);
+      setShowSendConfirm(false);
     }
   }
 
@@ -618,7 +628,7 @@ function CampaignDetail({
             </button>
             <button
               type="button"
-              onClick={handleSend}
+              onClick={openSendConfirm}
               disabled={busy || previewedKey !== filterKey}
               title={sendDisabledReason || undefined}
             >
@@ -660,6 +670,45 @@ function CampaignDetail({
                 {disarmBusy ? "Turning off…" : "Turn off auto-enroll"}
               </button>
             </p>
+          )}
+
+          {showSendConfirm && preview && (
+            <ConfirmDialog
+              title={`Send "${campaign.name}"?`}
+              confirmLabel="Send campaign"
+              onConfirm={confirmSend}
+              onCancel={() => setShowSendConfirm(false)}
+            >
+              <p>Sending to {sourceLabels[sourceId] || sourceId || "leads"}.</p>
+              <dl className="detail-grid">
+                <div className="detail-row">
+                  <dt>Matched</dt>
+                  <dd>{preview.matched}</dd>
+                </div>
+                <div className="detail-row">
+                  <dt>Will enroll</dt>
+                  <dd>{preview.willEnroll}</dd>
+                </div>
+                <div className="detail-row">
+                  <dt>Already enrolled</dt>
+                  <dd>{preview.alreadyEnrolled}</dd>
+                </div>
+                <div className="detail-row">
+                  <dt>Skipped (no phone)</dt>
+                  <dd>{preview.skippedNoPhone}</dd>
+                </div>
+                <div className="detail-row">
+                  <dt>Skipped (invalid phone)</dt>
+                  <dd>{preview.skippedBadPhone}</dd>
+                </div>
+              </dl>
+              {armAuto && (
+                <p>
+                  Keep this segment running is on — this segment stays live, and anyone who matches it later joins
+                  this campaign automatically.
+                </p>
+              )}
+            </ConfirmDialog>
           )}
         </div>
       )}
@@ -722,6 +771,11 @@ export default function CampaignsTab({
   const [selectedId, setSelectedId] = useState(focusCampaignId);
   const [sources, setSources] = useState([]);
   const [deletingId, setDeletingId] = useState(null);
+  // The campaign the delete-confirm dialog is up for, if any. Holding the
+  // whole campaign (not just an id) means the dialog can render its
+  // enrollment breakdown straight from the list row already in hand, with no
+  // extra fetch.
+  const [deleteTarget, setDeleteTarget] = useState(null);
   const [duplicatingId, setDuplicatingId] = useState(null);
   // Per-campaign activation rollup, read from the lead magnet's own database.
   // Its own request rather than part of /api/campaigns: it crosses to a
@@ -766,32 +820,32 @@ export default function CampaignsTab({
     }
   }
 
-  async function handleDelete(campaign) {
-    // Spell out the enrollments going with it. The count is the whole reason
-    // to hesitate — deleting a campaign mid-drip stops every lead in it.
-    const counts = campaign.enrollments || {};
-    const enrolled = Object.values(counts).reduce((n, v) => n + v, 0);
-    const breakdown = Object.entries(counts)
-      .filter(([, n]) => n)
-      .map(([status, n]) => `${n} ${status}`)
-      .join(", ");
+  // The count is the whole reason to hesitate over deleting — deleting a
+  // campaign mid-drip stops every lead in it. Kept as a plain helper (rather
+  // than inline in the dialog's JSX) so both the dialog body and the "no
+  // enrollments" fallback below read off the same numbers.
+  function deleteEnrollmentBreakdown(campaign) {
+    const counts = (campaign && campaign.enrollments) || {};
+    const total = Object.values(counts).reduce((n, v) => n + v, 0);
+    const breakdown = Object.entries(counts).filter(([, n]) => n);
+    return { total, breakdown };
+  }
 
-    const warning = enrolled
-      ? `Delete "${campaign.name}"? This also deletes its ${enrolled} enrollments (${breakdown}) — any lead still mid-drip stops receiving messages. Delivery history already recorded is kept. This cannot be undone.`
-      : `Delete "${campaign.name}"? This cannot be undone.`;
-    if (!window.confirm(warning)) return;
-
+  async function confirmDelete() {
+    const campaign = deleteTarget;
+    if (!campaign) return;
     setError(null);
     setDeletingId(campaign._id);
     try {
       await deleteCampaign(campaign._id);
       // The detail view would be showing a campaign that no longer exists.
       if (selectedId === campaign._id) setSelectedId(null);
-      reload();
+      await reload();
     } catch (err) {
       setError(err.message);
     } finally {
       setDeletingId(null);
+      setDeleteTarget(null);
     }
   }
 
@@ -813,6 +867,7 @@ export default function CampaignsTab({
   const sourceLabels = useMemo(() => Object.fromEntries(sources.map((s) => [s.value, s.label])), [sources]);
 
   const selected = campaigns.find((c) => c._id === selectedId);
+  const { total: deleteEnrolledTotal, breakdown: deleteBreakdown } = deleteEnrollmentBreakdown(deleteTarget);
 
   return (
     <div>
@@ -930,7 +985,7 @@ export default function CampaignsTab({
                         disabled={deletingId === c._id}
                         onClick={(e) => {
                           e.stopPropagation();
-                          handleDelete(c);
+                          setDeleteTarget(c);
                         }}
                       >
                         {deletingId === c._id ? "Deleting…" : "Delete"}
@@ -959,6 +1014,36 @@ export default function CampaignsTab({
           sendingBusy={sendingBusy}
           onToggleSending={onToggleSending}
         />
+      )}
+
+      {deleteTarget && (
+        <ConfirmDialog
+          title={`Delete "${deleteTarget.name}"?`}
+          confirmLabel="Delete campaign"
+          destructive
+          onConfirm={confirmDelete}
+          onCancel={() => setDeleteTarget(null)}
+        >
+          {deleteEnrolledTotal ? (
+            <>
+              <p>
+                This also deletes its {deleteEnrolledTotal} enrollment{deleteEnrolledTotal === 1 ? "" : "s"} — any
+                lead still mid-drip stops receiving messages. Delivery history already recorded is kept. This
+                cannot be undone.
+              </p>
+              <dl className="detail-grid">
+                {deleteBreakdown.map(([status, n]) => (
+                  <div className="detail-row" key={status}>
+                    <dt>{status}</dt>
+                    <dd>{n}</dd>
+                  </div>
+                ))}
+              </dl>
+            </>
+          ) : (
+            <p>This cannot be undone.</p>
+          )}
+        </ConfirmDialog>
       )}
     </div>
   );
