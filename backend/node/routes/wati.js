@@ -140,6 +140,29 @@ function matchStopKeyword(text) {
   return STOP_KEYWORDS.has(trimmed.toLowerCase()) ? trimmed : undefined;
 }
 
+// Marketing templates can carry WhatsApp's own built-in opt-out button.
+// UNCONFIRMED: "Stop promotions" is the standard label documented for that
+// button, but nothing in this repo's fixtures confirms WATI forwards it
+// verbatim rather than translating or relabelling it — confirm against a
+// real inbound button-opt-out event before relying on this in production.
+const MARKETING_OPT_OUT_BUTTON_LABELS = new Set(["stop promotions"].map((k) => k.toLowerCase()));
+
+// Requires the event to actually be a button tap (task 3's persisted
+// interactiveType, via extractInteractiveType) so typed text that merely
+// reads like a button label can't match through this path — that's what
+// matchStopKeyword() above is for. Label comparison is case- and
+// whitespace-normalised the same way matchStopKeyword() normalises keywords.
+// Returns the trimmed original label (for storing as OptOut.keyword) or
+// undefined.
+function matchMarketingOptOutButton(body) {
+  if (extractInteractiveType(body) !== "button") return undefined;
+  const text = extractText(body);
+  if (typeof text !== "string") return undefined;
+  const trimmed = text.trim();
+  if (!trimmed) return undefined;
+  return MARKETING_OPT_OUT_BUTTON_LABELS.has(trimmed.toLowerCase()) ? trimmed : undefined;
+}
+
 // Record the opt-out and cancel every active enrollment for this phone across
 // every campaign — opt-out is a global, per-phone concern, not a per-campaign
 // one, so this deliberately does not scope to whichever campaign/enrollment
@@ -341,7 +364,10 @@ router.post("/wati/webhook", async (req, res) => {
   // false` is the same "this is an inbound message from the lead" signal
   // normalizeStatus() uses to classify the event as "received"; ordinary
   // (non-STOP) inbound replies are completely unaffected by this block and
-  // continue to be recorded exactly as before via MessageEvent above.
+  // continue to be recorded exactly as before via MessageEvent above. Also
+  // catches a tap on a marketing template's built-in opt-out button
+  // (matchMarketingOptOutButton) — same signal, same recording path, just a
+  // button interaction instead of typed text.
   //
   // A non-2xx response here just makes WATI retry the same event, so a bug or
   // a transient DB error in opt-out processing must never surface as one —
@@ -349,7 +375,7 @@ router.post("/wati/webhook", async (req, res) => {
   // simply skipping opt-out processing for this one event.
   try {
     if (body.owner === false && phone) {
-      const keyword = matchStopKeyword(extractText(body));
+      const keyword = matchStopKeyword(extractText(body)) || matchMarketingOptOutButton(body);
       if (keyword) await recordOptOut(phone, keyword);
     }
   } catch (err) {
