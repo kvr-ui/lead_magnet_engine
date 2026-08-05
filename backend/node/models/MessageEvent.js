@@ -24,6 +24,29 @@ const messageEventSchema = new Schema(
     // it links every event in one message's lifecycle together, which is far
     // more reliable than matching on phone number alone.
     providerMessageId: { type: String, trim: true, index: true },
+    // The wamid of OUR message this inbound event is answering — WATI's
+    // "replyContextId" on a quoted reply or a template button tap. Lets a
+    // later flow condition ask "did they reply to *this* message node"
+    // instead of approximating with "any inbound message after this node's
+    // send time" (wrong the moment two message nodes fire close together, since
+    // a reply to the first would be attributed to the second). Only ever set on
+    // inbound events; absent on send/status events and on historical rows
+    // recorded before this field existed — both read as "no data".
+    inReplyToProviderMessageId: { type: String, trim: true, index: true },
+    // The raw payload `type` field on an inbound event — "button", "list",
+    // "text", or absent. This is how a quick-reply tap is told apart from
+    // typed text: both land in `text` below, identically.
+    interactiveType: { type: String, trim: true },
+    // The tapped button/list option's machine-stable id, captured
+    // opportunistically when the payload happens to carry one under a field
+    // name we recognize. UNCONFIRMED: the one real captured button fixture in
+    // this repo has no such field at all — just
+    // { eventType: "message", type: "button", text: "<button label>" }. Nothing
+    // in this codebase depends on this field being populated. Confirm the real
+    // field name by sending one live quick-reply template and reading the
+    // `[wati/webhook] ... body:` log line the handler already prints, then
+    // tighten extractInteractivePayloadId() in routes/wati.js accordingly.
+    interactivePayloadId: { type: String, trim: true },
     text: { type: String }, // reply / inbound message body, when the event carries one
     failedCode: { type: String, trim: true }, // Meta's error code on a failed send
     failedDetail: { type: String },

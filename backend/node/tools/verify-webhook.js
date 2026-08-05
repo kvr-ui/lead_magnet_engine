@@ -9,11 +9,17 @@ const PHONE = "919000000001";
 const W1 = "wamid.TEST.SEND.0001"; // wamid of the message we send
 const L1 = "local-guid-0001"; // WATI's own id for the same message
 const W2 = "wamid.TEST.INBOUND.0002"; // wamid of the lead's reply
+const W3 = "wamid.TEST.INBOUND.0003"; // second inbound reply, used to probe opportunistic payload-id capture
 
 const NODE_ID = "verify_msg_node"; // the graph node id this fixture's one message step stands in for
 
+// The webhook now requires the shared secret (routes/wati.js, task 1) on every
+// call. Read whatever's on the live active integration rather than faking one
+// up — SECRET is filled in by the IIFE below before the first post() call.
+let SECRET = "";
+
 const post = async (body) => {
-  const res = await fetch(`${BASE}/api/wati/webhook`, {
+  const res = await fetch(`${BASE}/api/wati/webhook?secret=${encodeURIComponent(SECRET)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -48,10 +54,20 @@ const check = (name, pass, detail) => {
   const campaigns = db.collection("campaigns");
   const enrollments = db.collection("campaignenrollments");
   const events = db.collection("messageevents");
+  const integrations = db.collection("whatsappintegrations");
+
+  const activeIntegration = await integrations.findOne({ active: true });
+  if (!activeIntegration?.webhookSecret) {
+    console.error("No active WhatsAppIntegration with a webhookSecret found — connect one first (Integrations tab).");
+    await m.disconnect();
+    process.exit(1);
+    return;
+  }
+  SECRET = activeIntegration.webhookSecret;
 
   // Clean slate for this phone / test campaign.
   await events.deleteMany({ phone: PHONE });
-  await events.deleteMany({ providerMessageId: { $in: [W1, W2, L1] } });
+  await events.deleteMany({ providerMessageId: { $in: [W1, W2, W3, L1] } });
   await enrollments.deleteMany({ phone: PHONE });
   await campaigns.deleteMany({ name: "__verify_delivery__" });
 
@@ -120,6 +136,26 @@ const check = (name, pass, detail) => {
   const noPhone = rows.filter((r) => r.phone === "unknown");
   check("status events inherit phone from enrollment", noPhone.length === 0, `${noPhone.length} rows still "unknown"`);
 
+  // --- reply-context id + interactive type capture (task 3) ------------
+  // W2 is the one realistic captured fixture in this repo: an inbound button
+  // tap that carries replyContextId + type, but no separate payload id.
+  const w2Row = rows.find((r) => r.providerMessageId === W2);
+  check(
+    "realistic button reply persists inReplyToProviderMessageId (the wamid it answers)",
+    w2Row?.inReplyToProviderMessageId === W1,
+    `got ${w2Row?.inReplyToProviderMessageId}`
+  );
+  check(
+    "realistic button reply persists interactiveType 'button'",
+    w2Row?.interactiveType === "button",
+    `got ${w2Row?.interactiveType}`
+  );
+  check(
+    "realistic button reply's missing payload id writes fine with no interactivePayloadId set",
+    w2Row?.interactivePayloadId === undefined,
+    `got ${JSON.stringify(w2Row?.interactivePayloadId)}`
+  );
+
   // --- the API the UI actually calls -----------------------------------
   const funnel = await (await fetch(`${BASE}/api/campaigns/${campaign.insertedId}/delivery`)).json();
   check("funnel reports 1 delivered lead", funnel.counts.delivered.leads === 1, JSON.stringify(funnel.counts.delivered));
@@ -142,8 +178,40 @@ const check = (name, pass, detail) => {
     JSON.stringify(list.enrollments[0]?.delivery || {})
   );
 
+  // --- opportunistic button payload-id capture (task 3) -----------------
+  // W3 is NOT a captured fixture — the `button.payload` shape is a guess at
+  // one of several plausible field names (see extractInteractivePayloadId()
+  // in routes/wati.js). Posted after the funnel/timeline/list checks above
+  // so it doesn't shift those counts; this only proves the opportunistic-
+  // capture plumbing works when a recognized field name IS present, and says
+  // nothing about what WATI actually sends, which is still unconfirmed.
+  await post({
+    eventType: "message",
+    waId: PHONE,
+    whatsappMessageId: W3,
+    replyContextId: W1,
+    owner: false,
+    statusString: "SENT",
+    text: "Session A",
+    type: "button",
+    button: { payload: "OPT_A" },
+    ...chan,
+  });
+  await new Promise((r) => setTimeout(r, 300));
+  const w3Row = await events.findOne({ providerMessageId: W3 });
+  check(
+    "opportunistic payload id captured when present under a recognized field name",
+    w3Row?.interactivePayloadId === "OPT_A",
+    `got ${w3Row?.interactivePayloadId}`
+  );
+  check(
+    "opportunistically-captured event still carries inReplyToProviderMessageId + interactiveType",
+    w3Row?.inReplyToProviderMessageId === W1 && w3Row?.interactiveType === "button",
+    `got inReplyTo=${w3Row?.inReplyToProviderMessageId} type=${w3Row?.interactiveType}`
+  );
+
   // Cleanup.
-  await events.deleteMany({ $or: [{ phone: PHONE }, { providerMessageId: { $in: [W1, W2] } }] });
+  await events.deleteMany({ $or: [{ phone: PHONE }, { providerMessageId: { $in: [W1, W2, W3] } }] });
   await enrollments.deleteMany({ phone: PHONE });
   await campaigns.deleteMany({ name: "__verify_delivery__" });
 
