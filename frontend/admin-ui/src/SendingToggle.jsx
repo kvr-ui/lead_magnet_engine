@@ -1,48 +1,13 @@
-import { useEffect, useState } from "react";
-import { fetchSendingEnabled, setSendingEnabled } from "./api";
-
 // Global kill switch, in the header so its state is visible from every tab.
 // Off is the safe state and is styled as the loud one: while testing, the
 // thing worth noticing is sending being live, not it being off.
-export default function SendingToggle() {
-  const [enabled, setEnabled] = useState(null);
-  const [queued, setQueued] = useState(0);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(null);
-
-  useEffect(() => {
-    fetchSendingEnabled()
-      .then((d) => {
-        setEnabled(d.enabled);
-        setQueued(d.queued);
-      })
-      .catch((err) => setError(err.message));
-  }, []);
-
-  async function toggle() {
-    const next = !enabled;
-    // Turning it on releases everything already queued — say how much before
-    // it happens, not after.
-    if (next) {
-      const warning = queued
-        ? `Turn sending ON?\n\n${queued} lead(s) are already queued in active campaigns and will start receiving real WhatsApp messages within a few minutes.`
-        : "Turn sending ON?\n\nCampaign messages will be sent for real from now on.";
-      if (!window.confirm(warning)) return;
-    }
-
-    setError(null);
-    setBusy(true);
-    try {
-      const d = await setSendingEnabled(next);
-      setEnabled(d.enabled);
-      setQueued(d.queued);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
+//
+// State (enabled/queued/busy/error) and the toggle action live in App, the
+// app root — see App.jsx — rather than here, so the campaign status strip
+// (CampaignStatus.jsx) can read and drive the very same state instead of
+// polling a second copy of it. This component is now a plain controlled
+// view: same markup and behaviour as before, driven by props.
+export default function SendingToggle({ enabled, queued, busy, error, onToggle }) {
   if (enabled === null) {
     return <span className="muted">{error || "Checking sending…"}</span>;
   }
@@ -52,7 +17,7 @@ export default function SendingToggle() {
       <button
         type="button"
         className={`switch ${enabled ? "on" : "off"}`}
-        onClick={toggle}
+        onClick={onToggle}
         disabled={busy}
         role="switch"
         aria-checked={enabled}

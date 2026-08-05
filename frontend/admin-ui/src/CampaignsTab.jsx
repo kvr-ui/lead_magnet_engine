@@ -224,7 +224,24 @@ function CreateCampaignForm({ sources, onCreated, onCancel }) {
 
 // --- Campaign detail: filter, preview, send, enrollments -----------------
 
-function CampaignDetail({ campaign, sourceLabels, sources, onClose, onChanged, onDuplicate, duplicating }) {
+function CampaignDetail({
+  campaign,
+  sourceLabels,
+  sources,
+  onClose,
+  onChanged,
+  onDuplicate,
+  duplicating,
+  // Global sending state, lifted to the app root (see App.jsx) and threaded
+  // down through here. Not consumed by this component yet — a later task in
+  // this plan places CampaignStatus (which does consume it) into this panel.
+  // Aliased to an underscore-prefixed name because they're accepted, not
+  // used, here.
+  sendingEnabled: _sendingEnabled,
+  sendingQueued: _sendingQueued,
+  sendingBusy: _sendingBusy,
+  onToggleSending: _onToggleSending,
+}) {
   const [conditions, setConditions] = useState([]);
   const [preview, setPreview] = useState(null);
   const [previewedKey, setPreviewedKey] = useState(null);
@@ -584,7 +601,17 @@ function CampaignDetail({ campaign, sourceLabels, sources, onClose, onChanged, o
 
 // --- Top-level tab --------------------------------------------------------
 
-export default function CampaignsTab({ focusCampaignId = null }) {
+export default function CampaignsTab({
+  focusCampaignId = null,
+  // Global sending kill switch, lifted to the app root (see App.jsx) so it is
+  // fetched exactly once and shared with the header toggle. Threaded straight
+  // through to CampaignDetail below, which does not consume it yet — a later
+  // task in this plan places CampaignStatus (which does) into that panel.
+  sendingEnabled = null,
+  sendingQueued = 0,
+  sendingBusy = false,
+  onToggleSending,
+}) {
   const [campaigns, setCampaigns] = useState([]);
   const [error, setError] = useState(null);
   const [showCreate, setShowCreate] = useState(false);
@@ -825,6 +852,10 @@ export default function CampaignsTab({ focusCampaignId = null }) {
           onChanged={reload}
           onDuplicate={handleDuplicate}
           duplicating={duplicatingId === selected._id}
+          sendingEnabled={sendingEnabled}
+          sendingQueued={sendingQueued}
+          sendingBusy={sendingBusy}
+          onToggleSending={onToggleSending}
         />
       )}
     </div>

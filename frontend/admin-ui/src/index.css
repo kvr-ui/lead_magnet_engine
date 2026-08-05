@@ -1676,3 +1676,38 @@ select:focus-visible {
 .confirm-dialog-confirm.destructive:active:not(:disabled) {
   filter: brightness(0.92);
 }
+
+/* --- CampaignStatus --------------------------------------------------------
+   The status strip composing global sending, active/paused, published-vs-
+   draft and auto-enroll into badges plus one sentence. Reuses .notice and
+   the existing .badge-* classes throughout; no new colour literals here. */
+
+.campaign-status {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.campaign-status-sending-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.campaign-status-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.campaign-status-sentence {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+}
+
+.campaign-status-autoenroll-detail {
+  margin: 0;
+}
